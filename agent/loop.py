@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sys
+import threading
+import time
 from collections import deque
 from typing import Any
 
 from openai import OpenAI
 
-from agent.compaction import THINK_RE, ThinkFilter, compact_if_needed
+from agent.compaction import THINK_RE, compact_if_needed
 from agent.llm import active_model, create_client
 from agent.logging_setup import get_logger
 from agent.prompt import build_system_prompt
@@ -57,6 +60,82 @@ def _result_summary(result: Any) -> str:
     return str(result)[:160]
 
 
+class Spinner:
+    """Audio-equalizer-style spinner driven by a daemon thread.
+
+    Renders five Unicode eighth-block bars side-by-side, each on its own
+    phase-offset sine wave so you get a smooth wave effect — roughly matches
+    the look of a CSS staggered-bar animation, but in a single terminal line.
+
+    Safe to call `stop()` repeatedly; no-op if not running or stdout isn't a TTY.
+    Clears its own line on stop so subsequent prints start clean.
+    """
+
+    # Eighth-block glyphs indexed 0..8 (index 0 = space, 1..8 = ▁..█).
+    BLOCKS = " ▁▂▃▄▅▆▇█"
+    # Phase offsets approximate the CSS delay sequence scaled to [0, 1].
+    PHASES = (0.0, 0.167, 0.333, 0.5, 0.667)
+    PERIOD = 0.9  # seconds for one full wave cycle (matches CSS)
+    MIN_LEVEL = 0.4  # bars never fully flatten (matches CSS scaleY 0.4 → 1.0)
+
+    def __init__(self, message: str = "thinking", interval: float = 0.06) -> None:
+        self.message = message
+        self.interval = interval
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        # Width reserved when erasing: 2-space prefix + bars + space + message.
+        self._width = 2 + len(self.PHASES) + 1 + len(self.message) + 2
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None
+
+    def start(self) -> None:
+        if self.running or not sys.stdout.isatty():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self.running:
+            return
+        self._stop.set()
+        assert self._thread is not None
+        self._thread.join(timeout=0.5)
+        self._thread = None
+        sys.stdout.write("\r" + " " * self._width + "\r")
+        sys.stdout.flush()
+
+    def _render(self, t: float) -> str:
+        """Compute the bar string for elapsed time `t` (seconds)."""
+        chars = []
+        for phase in self.PHASES:
+            # Sine wave in [0, 1] for this bar.
+            wave = 0.5 + 0.5 * math.sin(2 * math.pi * ((t / self.PERIOD) - phase))
+            # Squash into [MIN_LEVEL, 1.0] so bars never flatten completely.
+            level = self.MIN_LEVEL + (1.0 - self.MIN_LEVEL) * wave
+            idx = max(1, min(8, int(level * 8)))
+            chars.append(self.BLOCKS[idx])
+        return "".join(chars)
+
+    def _run(self) -> None:
+        start = time.monotonic()
+        while not self._stop.is_set():
+            bars = self._render(time.monotonic() - start)
+            sys.stdout.write(f"\r  {bars} {self.message}")
+            sys.stdout.flush()
+            if self._stop.wait(self.interval):
+                break
+
+    def __enter__(self) -> Spinner:
+        self.start()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.stop()
+
+
 def _fingerprint(name: str, raw_args: str) -> str:
     """Stable hash of (tool name + arguments) for duplicate-call detection."""
     try:
@@ -74,7 +153,12 @@ def _stream_turn(
     local: bool,
     verbose: bool,
 ) -> tuple[str, list[dict] | None]:
-    """Stream one LLM turn. Returns (content_str, tool_calls_list|None)."""
+    """Stream one LLM turn. Returns (content_str, tool_calls_list|None).
+
+    Content (including <think> blocks and model narration) is accumulated silently
+    so the user sees only tool-call status. The final answer is rendered by the
+    caller once the last iteration returns with no tool_calls.
+    """
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -90,53 +174,40 @@ def _stream_turn(
     content = ""
     tool_calls_acc: dict[int, dict] = {}
     printed_names: set[int] = set()
-    any_content = False
-    think_filter = ThinkFilter()
+    spinner = Spinner("thinking") if verbose else None
+    if spinner:
+        spinner.start()
 
-    for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
+    try:
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
 
-        if getattr(delta, "content", None):
-            content += delta.content
-            if verbose:
-                visible = think_filter.feed(delta.content)
-                if visible:
-                    if not any_content:
-                        _print("  ", end="")
-                        any_content = True
-                    sys.stdout.write(visible)
-                    sys.stdout.flush()
+            if getattr(delta, "content", None):
+                content += delta.content
 
-        if getattr(delta, "tool_calls", None):
-            for tc in delta.tool_calls:
-                idx = tc.index
-                entry = tool_calls_acc.setdefault(idx, {"id": None, "name": "", "arguments": ""})
-                if tc.id:
-                    entry["id"] = tc.id
-                if tc.function:
-                    if tc.function.name:
-                        entry["name"] += tc.function.name
-                    if tc.function.arguments:
-                        entry["arguments"] += tc.function.arguments
-                if verbose and entry["name"] and idx not in printed_names:
-                    if any_content:
-                        _print()
-                        any_content = False
-                    _print(f"  → {entry['name']}(...)")
-                    printed_names.add(idx)
-
-    if verbose:
-        tail = think_filter.flush()
-        if tail:
-            if not any_content:
-                _print("  ", end="")
-                any_content = True
-            sys.stdout.write(tail)
-            sys.stdout.flush()
-        if any_content:
-            _print()
+            if getattr(delta, "tool_calls", None):
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    entry = tool_calls_acc.setdefault(
+                        idx, {"id": None, "name": "", "arguments": ""}
+                    )
+                    if tc.id:
+                        entry["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            entry["name"] += tc.function.name
+                        if tc.function.arguments:
+                            entry["arguments"] += tc.function.arguments
+                    if verbose and entry["name"] and idx not in printed_names:
+                        if spinner:
+                            spinner.stop()
+                        _print(f"  → {entry['name']}(...)")
+                        printed_names.add(idx)
+    finally:
+        if spinner:
+            spinner.stop()
 
     content = THINK_RE.sub("", content).strip()
 

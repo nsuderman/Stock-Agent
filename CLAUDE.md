@@ -1,7 +1,7 @@
 # CLAUDE.md — guidance for Claude Code on this project
 
 A local-LLM ReAct agent that queries a PostgreSQL stock/backtest DB. Entry
-point is `ask` (or `python -m agent`); core loop is `agent/loop.py`; tools
+point is `stock-agent` (or `python -m agent`); core loop is `agent/loop.py`; tools
 are under `agent/tools/`.
 
 ## Mental model

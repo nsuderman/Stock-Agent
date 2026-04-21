@@ -1,4 +1,4 @@
-"""Allow `python -m agent "..."` as an alternative to the `ask` entry point."""
+"""Allow `python -m agent "..."` as an alternative to the `stock-agent` entry point."""
 
 from agent.cli import main
 

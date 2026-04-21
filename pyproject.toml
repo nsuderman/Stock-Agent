@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-ask = "agent.cli:main"
+stock-agent = "agent.cli:main"
 
 [project.urls]
 Repository = "https://github.com/nsuderman/Stock-Agent"

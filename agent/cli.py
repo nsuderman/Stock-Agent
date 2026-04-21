@@ -1,4 +1,4 @@
-"""CLI entry point: `ask "your question" [--session name]`"""
+"""CLI entry point: `stock-agent "your question" [--session name]`"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from agent.session import default_session_name, load_session, reset_session, sav
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ask",
+        prog="stock-agent",
         description="Ask the trading-data agent a question.",
     )
     parser.add_argument("question", nargs="+", help="Your question (any words).")

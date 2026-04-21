@@ -1,4 +1,4 @@
-# Agent
+# Stock-Agent
 
 [![CI](https://github.com/nsuderman/Stock-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/nsuderman/Stock-Agent/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -11,8 +11,8 @@ database. Ask questions in natural language; the agent plans tool calls,
 reads the data, and answers. Built for a local llama.cpp / vLLM server;
 works with remote OpenAI-compatible endpoints too.
 
-```bash
-$ ask "what stocks are currently held across my recent backtest runs?"
+```console
+$ stock-agent "what stocks are currently held across my recent backtest runs?"
 [iter 1]
   → get_recent_backtest_holdings(...)
     args: {"days_back": 7}
@@ -34,7 +34,7 @@ $ ask "what stocks are currently held across my recent backtest runs?"
   falls back to LLM summarization if still over budget. Context-window size is
   probed from `/v1/models` at runtime (llama.cpp `--ctx-size` with alias
   matching).
-- **Daily sessions by default** — `ask.py` resumes today's context
+- **Daily sessions by default** — `stock-agent` resumes today's context
   automatically; `--session <name>` pins a longer project.
 - **Persistent memory** (`memory.md`) loaded into every system prompt.
 - **Duplicate-call guard** — identical back-to-back tool calls are rejected
@@ -47,7 +47,7 @@ $ ask "what stocks are currently held across my recent backtest runs?"
 
 ```mermaid
 flowchart LR
-    CLI[ask / python -m agent] -->|question| Loop[loop.run_agent]
+    CLI[stock-agent / python -m agent] -->|question| Loop[loop.run_agent]
     Loop -->|stream| LLM[OpenAI-compatible<br/>local or remote]
     Loop -->|tool_calls| Tools[Tool registry]
     Tools -->|decorator + Pydantic| Market[market.py]
@@ -83,28 +83,28 @@ pre-commit install     # optional but recommended
 
 ```bash
 # Default — resumes today's daily session (sessions/YYYY-MM-DD.json)
-ask "how did AAPL perform in Q3 2024?"
-ask "and how does that compare to MSFT?"   # remembers previous turn
+stock-agent "how did AAPL perform in Q3 2024?"
+stock-agent "and how does that compare to MSFT?"   # remembers previous turn
 
 # Named session for projects that outlive a day
-ask --session research "show me NVDA's 2024 return"
-ask --session research "and how did it compare to AMD?"
-ask --session research --reset "fresh start"
+stock-agent --session research "show me NVDA's 2024 return"
+stock-agent --session research "and how did it compare to AMD?"
+stock-agent --session research --reset "fresh start"
 
 # True one-shot — no session load, no save
-ask --no-session "quick question"
+stock-agent --no-session "quick question"
 
 # Teach durable facts — written to memory.md, loaded into every future run
-ask "remember my universe is EQUITY with market_cap > 1B"
+stock-agent "remember my universe is EQUITY with market_cap > 1B"
 
 # Other flags
-ask --remote "..."            # use remote (Azure) LLM instead of local
-ask --quiet "..."             # hide per-tool trace
-ask --max-iterations 20 "..." # default is 12
+stock-agent --remote "..."            # use remote (Azure) LLM instead of local
+stock-agent --quiet "..."             # hide per-tool trace
+stock-agent --max-iterations 20 "..." # default is 12
 ```
 
 If you prefer not to install the console script, `python -m agent "..."` is
-equivalent to `ask "..."`.
+equivalent to `stock-agent "..."`.
 
 ## Configuration
 
@@ -199,7 +199,7 @@ agent/
 ├── agent/                  # the installable package
 │   ├── __init__.py
 │   ├── __main__.py         # python -m agent
-│   ├── cli.py              # ask entry point
+│   ├── cli.py              # stock-agent entry point
 │   ├── loop.py             # ReAct loop + streaming
 │   ├── compaction.py       # stage 1/2 compaction + ThinkFilter
 │   ├── config.py           # Pydantic Settings
