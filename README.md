@@ -122,6 +122,7 @@ equivalent to `stock-agent "..."`.
 | `--reset` | off | Delete the active session file before running. |
 | `--remote` | off | Use the remote LLM (Azure) instead of the local server. |
 | `--quiet` | off | Hide per-tool trace + compaction messages. |
+| `--debug` | off | Show full per-tool trace (args, result summary, iteration headers). |
 | `--max-iterations <N>` | 12 | Cap on ReAct loop iterations per invocation. |
 
 ### Environment variables (`.env`)

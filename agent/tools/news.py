@@ -25,11 +25,7 @@ def _extract(item: dict[str, Any]) -> dict[str, Any]:
     """
     c: dict[str, Any] = item.get("content") or item
     provider = c.get("provider")
-    publisher = (
-        provider.get("displayName")
-        if isinstance(provider, dict)
-        else c.get("publisher")
-    )
+    publisher = provider.get("displayName") if isinstance(provider, dict) else c.get("publisher")
     click = c.get("clickThroughUrl")
     link = click.get("url") if isinstance(click, dict) else c.get("link")
     return {

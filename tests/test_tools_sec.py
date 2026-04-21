@@ -92,9 +92,7 @@ class TestGetRecentFilings:
 
     def test_unknown_ticker_returns_error(self, mock_edgar):
         mock_edgar["edgar"].Company.side_effect = Exception("ticker not found")
-        result = invoke_tool(
-            "get_recent_filings", {"symbol": "ZZZZZ", "form_type": "10-K"}
-        )
+        result = invoke_tool("get_recent_filings", {"symbol": "ZZZZZ", "form_type": "10-K"})
         assert "error" in result
         assert "ZZZZZ" in result["error"]
 

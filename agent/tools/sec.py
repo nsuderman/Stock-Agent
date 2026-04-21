@@ -25,9 +25,7 @@ def _configure_edgar() -> None:
     try:
         from edgar import set_identity
     except ImportError as e:
-        raise RuntimeError(
-            "edgartools not installed. Run `pip install edgartools`."
-        ) from e
+        raise RuntimeError("edgartools not installed. Run `pip install edgartools`.") from e
     set_identity(get_settings().sec_user_agent)
     _edgar_configured = True
 
@@ -77,9 +75,7 @@ def get_recent_filings(args: RecentFilingsArgs) -> dict[str, Any]:
 
     try:
         filings = (
-            company.get_filings(form=args.form_type)
-            if args.form_type
-            else company.get_filings()
+            company.get_filings(form=args.form_type) if args.form_type else company.get_filings()
         )
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}

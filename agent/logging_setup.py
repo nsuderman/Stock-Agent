@@ -28,6 +28,14 @@ def configure_logging() -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    # Third-party libraries log every request/identity at INFO which clobbers
+    # the streaming spinner line in interactive mode. Suppress unless the user
+    # explicitly drops to DEBUG.
+    noisy_level = logging.DEBUG if level <= logging.DEBUG else logging.WARNING
+    for noisy in ("httpx", "httpcore", "openai", "urllib3", "edgar", "yfinance"):
+        logging.getLogger(noisy).setLevel(noisy_level)
+
     _configured = True
 
 

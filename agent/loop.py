@@ -104,7 +104,8 @@ class Spinner:
         assert self._thread is not None
         self._thread.join(timeout=0.5)
         self._thread = None
-        sys.stdout.write("\r" + " " * self._width + "\r")
+        # \r + ANSI clear-entire-line so stale log chatter doesn't linger.
+        sys.stdout.write("\r\033[2K")
         sys.stdout.flush()
 
     def _render(self, t: float) -> str:
@@ -123,7 +124,9 @@ class Spinner:
         start = time.monotonic()
         while not self._stop.is_set():
             bars = self._render(time.monotonic() - start)
-            sys.stdout.write(f"\r  {bars} {self.message}")
+            # \033[K clears from cursor to end-of-line after the redraw, so any
+            # stray log tail past our text is wiped each frame.
+            sys.stdout.write(f"\r  {bars} {self.message}\033[K")
             sys.stdout.flush()
             if self._stop.wait(self.interval):
                 break
@@ -152,6 +155,7 @@ def _stream_turn(
     *,
     local: bool,
     verbose: bool,
+    debug: bool,
 ) -> tuple[str, list[dict] | None]:
     """Stream one LLM turn. Returns (content_str, tool_calls_list|None).
 
@@ -169,16 +173,17 @@ def _stream_turn(
     }
     kwargs["max_tokens" if local else "max_completion_tokens"] = 4096
 
-    stream = client.chat.completions.create(**kwargs)
-
     content = ""
     tool_calls_acc: dict[int, dict] = {}
     printed_names: set[int] = set()
     spinner = Spinner("thinking") if verbose else None
+    # Start the spinner BEFORE `create()` — that call blocks on the initial HTTP
+    # connection + response headers, which is part of what we want to visualize.
     if spinner:
         spinner.start()
 
     try:
+        stream = client.chat.completions.create(**kwargs)
         for chunk in stream:
             if not chunk.choices:
                 continue
@@ -200,7 +205,10 @@ def _stream_turn(
                             entry["name"] += tc.function.name
                         if tc.function.arguments:
                             entry["arguments"] += tc.function.arguments
-                    if verbose and entry["name"] and idx not in printed_names:
+                    # In debug mode, announce each tool as its name arrives (and
+                    # stop the spinner so it doesn't collide). In default mode,
+                    # stay silent — run_agent prints a one-line summary below.
+                    if verbose and debug and entry["name"] and idx not in printed_names:
                         if spinner:
                             spinner.stop()
                         _print(f"  → {entry['name']}(...)")
@@ -209,7 +217,15 @@ def _stream_turn(
         if spinner:
             spinner.stop()
 
-    content = THINK_RE.sub("", content).strip()
+    stripped = THINK_RE.sub("", content).strip()
+    # If the model put EVERYTHING inside <think> tags (empty answer after stripping)
+    # fall back to the content without the outer think wrappers so the user sees
+    # something instead of a blank answer block.
+    if not stripped and content.strip():
+        fallback = content.replace("<think>", "").replace("</think>", "").strip()
+        content = fallback or content.strip()
+    else:
+        content = stripped
 
     tool_calls = None
     if tool_calls_acc:
@@ -234,6 +250,7 @@ def run_agent(
     max_iterations: int = 12,
     local: bool = True,
     verbose: bool = True,
+    debug: bool = False,
     prior_messages: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Run the agent on `question`. Returns (answer, full_messages_list)."""
@@ -255,14 +272,19 @@ def run_agent(
     status_cb = _print if verbose else None
 
     for i in range(1, max_iterations + 1):
-        if verbose:
+        # In debug mode, print the iteration header up front. In default mode we
+        # compose a one-line summary AFTER the tools resolve so we can include
+        # a [blocked] marker inline.
+        if verbose and debug:
             _print(f"[iter {i}]")
 
         messages = compact_if_needed(
             messages, client=client, model=model, local=local, status_callback=status_cb
         )
 
-        content, tool_calls = _stream_turn(client, model, messages, local=local, verbose=verbose)
+        content, tool_calls = _stream_turn(
+            client, model, messages, local=local, verbose=verbose, debug=debug
+        )
 
         assistant_entry: dict[str, Any] = {"role": "assistant", "content": content or ""}
         if tool_calls:
@@ -272,6 +294,8 @@ def run_agent(
         if not tool_calls:
             return content or "", messages
 
+        summary_parts: list[str] = []
+
         for tc in tool_calls:
             name = tc["function"]["name"]
             raw_args = tc["function"]["arguments"] or "{}"
@@ -280,12 +304,13 @@ def run_agent(
             except json.JSONDecodeError:
                 args = {}
 
-            if verbose:
+            if verbose and debug:
                 arg_preview = raw_args if len(raw_args) <= 140 else raw_args[:140] + "..."
                 _print(f"    args: {arg_preview}")
 
             fp = _fingerprint(name, raw_args)
-            if fp in recent_calls:
+            blocked = fp in recent_calls
+            if blocked:
                 result: Any = {
                     "error": (
                         "Duplicate call: you just invoked this exact tool with these exact "
@@ -295,13 +320,15 @@ def run_agent(
                         "calling tools and provide the final answer."
                     )
                 }
-                if verbose:
+                if verbose and debug:
                     _print("    ← BLOCKED: duplicate tool call")
             else:
                 recent_calls.append(fp)
                 result = invoke_tool(name, args)
-                if verbose:
+                if verbose and debug:
                     _print(f"    ← {_result_summary(result)}")
+
+            summary_parts.append(f"{name}(...)" + (" [blocked]" if blocked else ""))
 
             messages.append(
                 {
@@ -311,5 +338,9 @@ def run_agent(
                     "content": _trunc(json.dumps(result, default=str)),
                 }
             )
+
+        # Default mode: one compact line per iteration, AFTER tools resolved.
+        if verbose and not debug:
+            _print(f"[iter {i}] → {', '.join(summary_parts)}")
 
     return "Stopped: reached max_iterations without a final answer.", messages
