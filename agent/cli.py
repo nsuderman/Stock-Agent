@@ -226,7 +226,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show full per-tool trace (args, result summary, and iteration headers).",
     )
-    parser.add_argument("--max-iterations", type=int, default=12)
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Cap on ReAct loop iterations (default from MAX_ITERATIONS env var, or 12).",
+    )
     return parser
 
 

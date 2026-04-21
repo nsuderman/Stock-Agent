@@ -247,15 +247,24 @@ def _stream_turn(
 def run_agent(
     question: str,
     *,
-    max_iterations: int = 12,
+    max_iterations: int | None = None,
     local: bool = True,
     verbose: bool = True,
     debug: bool = False,
     prior_messages: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
-    """Run the agent on `question`. Returns (answer, full_messages_list)."""
+    """Run the agent on `question`. Returns (answer, full_messages_list).
+
+    If `max_iterations` is None, falls back to the `MAX_ITERATIONS` setting
+    (which itself defaults to 12 if not in .env).
+    """
     if not TOOLS:
         raise RuntimeError("No tools registered — import agent.tools before calling run_agent.")
+
+    from agent.config import get_settings
+
+    if max_iterations is None:
+        max_iterations = get_settings().max_iterations
 
     client = create_client(local=local)
     model = active_model(local=local)

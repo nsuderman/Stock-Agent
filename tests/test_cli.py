@@ -48,9 +48,10 @@ class TestParser:
         ns = _build_parser().parse_args(["--quiet", "hi"])
         assert ns.quiet is True
 
-    def test_max_iterations_default(self):
+    def test_max_iterations_default_is_none(self):
+        """Default is None so run_agent falls back to Settings.max_iterations."""
         ns = _build_parser().parse_args(["hi"])
-        assert ns.max_iterations == 12
+        assert ns.max_iterations is None
 
     def test_max_iterations_override(self):
         ns = _build_parser().parse_args(["--max-iterations", "20", "hi"])

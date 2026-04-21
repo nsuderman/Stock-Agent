@@ -140,6 +140,7 @@ equivalent to `stock-agent "..."`.
 | `COMPACT_AT` | `0.75` | Compact when input ≥ this fraction of budget. |
 | `COMPACT_KEEP_RECENT` | `4` | Last N messages always kept verbatim. |
 | `MAX_RESPONSE_TOKENS` | `4096` | Reserved for reply; subtracted from window. |
+| `MAX_ITERATIONS` | `12` | Cap on ReAct tool-call rounds per invocation. Overridable per-call via `--max-iterations`. |
 | `SEC_USER_AGENT` | `Stock Agent (example@example.com)` | Required by SEC EDGAR fair-use policy. Put your real contact here. |
 | `LOG_LEVEL` | `INFO` | Root logger level. |
 

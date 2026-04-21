@@ -16,6 +16,20 @@ def test_defaults_load(monkeypatch: pytest.MonkeyPatch):
     assert s.backtest_schema == "stock"
     assert s.compact_at == 0.75
     assert s.max_response_tokens == 4096
+    assert s.max_iterations == 12
+
+
+def test_max_iterations_from_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MAX_ITERATIONS", "20")
+    reset_settings_cache()
+    assert get_settings().max_iterations == 20
+
+
+def test_max_iterations_range_enforced():
+    with pytest.raises(ValueError):
+        Settings(max_iterations=0)
+    with pytest.raises(ValueError):
+        Settings(max_iterations=101)
 
 
 def test_database_url_composed(monkeypatch: pytest.MonkeyPatch):

@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     compact_keep_recent: int = Field(default=4, ge=1)
     max_response_tokens: int = Field(default=4096, ge=128)
 
+    max_iterations: int = Field(
+        default=12,
+        ge=1,
+        le=100,
+        description="Cap on ReAct loop iterations per agent invocation.",
+    )
+
     log_level: str = Field(default="INFO")
 
     sec_user_agent: str = Field(
