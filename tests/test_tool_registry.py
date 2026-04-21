@@ -27,6 +27,8 @@ class TestRegistry:
             "run_sql",
             "remember",
             "get_stock_news",
+            "get_recent_filings",
+            "get_insider_transactions",
         }
         assert set(TOOLS.keys()) >= expected
 

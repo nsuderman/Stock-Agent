@@ -1,7 +1,7 @@
 """Tool package — imports every module to trigger `@tool` registration."""
 
 # Import for side effects: each module registers its tools with the global TOOLS dict.
-from agent.tools import backtest, db_meta, market, memory, news, sql  # noqa: F401
+from agent.tools import backtest, db_meta, market, memory, news, sec, sql  # noqa: F401
 from agent.tools.base import (
     TOOLS,
     ToolEntry,

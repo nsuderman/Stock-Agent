@@ -46,6 +46,11 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
+    sec_user_agent: str = Field(
+        default="Stock Agent (example@example.com)",
+        description="User-Agent header sent to SEC EDGAR. Their fair-use policy requires this.",
+    )
+
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}/{self.db_name}"

@@ -24,9 +24,9 @@ $ stock-agent "what stocks are currently held across my recent backtest runs?"
 
 ## Highlights
 
-- **15 typed, validated tools** covering market data, fundamentals, regime
-  signals, DTW breakouts, backtest results, Yahoo Finance news, and a
-  read-only SQL escape hatch.
+- **17 typed, validated tools** covering market data, fundamentals, regime
+  signals, DTW breakouts, backtest results, Yahoo Finance news, SEC EDGAR
+  filings + insider transactions, and a read-only SQL escape hatch.
 - **Pydantic argument models** for every tool — OpenAI tool schemas are
   auto-generated; no hand-written JSON to drift out of sync.
 - **Streaming** output with live tool-call status so there's no 10-minute
@@ -57,11 +57,13 @@ flowchart LR
     Tools --> Memory[memory.py]
     Tools --> Sql[sql.py]
     Tools --> News[news.py]
+    Tools --> Sec[sec.py]
     Market -.->|SQLAlchemy| DB[(PostgreSQL<br/>read-only)]
     Backtest -.-> DB
     DBMeta -.-> DB
     Sql -.-> DB
     News -.->|yfinance| Yahoo[(Yahoo Finance)]
+    Sec -.->|edgartools| Edgar[(SEC EDGAR)]
     Loop --> Compact[compaction<br/>stage 1 then 2]
     Loop --> Session[session.py]
     Session -.->|daily rollover| Fs[sessions/*.json]
@@ -137,6 +139,7 @@ equivalent to `stock-agent "..."`.
 | `COMPACT_AT` | `0.75` | Compact when input ≥ this fraction of budget. |
 | `COMPACT_KEEP_RECENT` | `4` | Last N messages always kept verbatim. |
 | `MAX_RESPONSE_TOKENS` | `4096` | Reserved for reply; subtracted from window. |
+| `SEC_USER_AGENT` | `Stock Agent (example@example.com)` | Required by SEC EDGAR fair-use policy. Put your real contact here. |
 | `LOG_LEVEL` | `INFO` | Root logger level. |
 
 ## Tools
@@ -156,6 +159,8 @@ equivalent to `stock-agent "..."`.
 | `get_recent_backtest_holdings` | Symbols currently held across N-day window of backtests |
 | `list_strategies` | strategies table |
 | `get_stock_news` | Recent Yahoo Finance headlines for a ticker |
+| `get_recent_filings` | SEC EDGAR filings (10-K/10-Q/8-K/DEF 14A/4/13F) for a ticker |
+| `get_insider_transactions` | Form 4 insider buying/selling with share count + price |
 | `run_sql` | Read-only SQL escape hatch |
 | `remember` | Append a fact to memory.md |
 

@@ -30,6 +30,7 @@ dependencies = [
     "pydantic>=2.5",
     "pydantic-settings>=2.1",
     "yfinance>=0.2.40",
+    "edgartools>=5.0",
 ]
 
 [project.optional-dependencies]
