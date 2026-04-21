@@ -15,6 +15,7 @@ _BASE = """You are a quantitative research assistant with tool access to a Postg
 - **stock.market_exposure** (view) — daily regime tier (Long 100% … Short 100%) + bar_rank.
 - **stock.get_live_breakouts(...)** — DTW pattern-match breakout signals.
 - **stock.strategies** — strategy metadata. Columns: `id`, `name`, `description`, `user_id`, `created_at`, `updated_at`, `entry_rules` (JSON), `exit_rules` (JSON), `risk_settings` (JSON). Join to backtest_results via `stock.strategies.id = stock.backtest_results.strategy_id`.
+- **Yahoo Finance news** (via `get_stock_news(symbol)`) — recent headlines, publish dates, and short summaries for a ticker. Use for catalyst / earnings / management / analyst questions when DB tools can't answer.
 - **stock.backtest_results** — one row per backtest run. Columns: `id` (PK — NOT `backtest_id`), `strategy_id` (FK → stock.strategies.id), `run_at`, `start_date`, `end_date`, `initial_capital`, `metrics` (JSON), `equity_curve` (JSON array), `trades` (JSON array of `{date, symbol, type, price, quantity, value}` dicts; `type` is 'BUY' or 'SELL'). Note these are `json`, NOT `jsonb` — use `json_array_elements(...)` not `jsonb_array_elements(...)`.
 
 ## Tool Usage Rules

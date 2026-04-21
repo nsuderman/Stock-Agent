@@ -24,8 +24,9 @@ $ stock-agent "what stocks are currently held across my recent backtest runs?"
 
 ## Highlights
 
-- **14 typed, validated tools** covering market data, fundamentals, regime
-  signals, DTW breakouts, backtest results, and a read-only SQL escape hatch.
+- **15 typed, validated tools** covering market data, fundamentals, regime
+  signals, DTW breakouts, backtest results, Yahoo Finance news, and a
+  read-only SQL escape hatch.
 - **Pydantic argument models** for every tool — OpenAI tool schemas are
   auto-generated; no hand-written JSON to drift out of sync.
 - **Streaming** output with live tool-call status so there's no 10-minute
@@ -55,10 +56,12 @@ flowchart LR
     Tools --> DBMeta[db_meta.py]
     Tools --> Memory[memory.py]
     Tools --> Sql[sql.py]
+    Tools --> News[news.py]
     Market -.->|SQLAlchemy| DB[(PostgreSQL<br/>read-only)]
     Backtest -.-> DB
     DBMeta -.-> DB
     Sql -.-> DB
+    News -.->|yfinance| Yahoo[(Yahoo Finance)]
     Loop --> Compact[compaction<br/>stage 1 then 2]
     Loop --> Session[session.py]
     Session -.->|daily rollover| Fs[sessions/*.json]
@@ -152,6 +155,7 @@ equivalent to `stock-agent "..."`.
 | `get_backtest_detail` | Full backtest with downsampled equity curve + capped trades |
 | `get_recent_backtest_holdings` | Symbols currently held across N-day window of backtests |
 | `list_strategies` | strategies table |
+| `get_stock_news` | Recent Yahoo Finance headlines for a ticker |
 | `run_sql` | Read-only SQL escape hatch |
 | `remember` | Append a fact to memory.md |
 
