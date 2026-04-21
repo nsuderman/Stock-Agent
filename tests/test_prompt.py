@@ -8,6 +8,11 @@ from pathlib import Path
 from agent.prompt import build_system_prompt
 
 
+def test_introduces_as_finn(tmp_memory: Path):
+    prompt = build_system_prompt()
+    assert "Finn" in prompt
+
+
 def test_injects_today_date(tmp_memory: Path):
     prompt = build_system_prompt()
     today = datetime.date.today().isoformat()
