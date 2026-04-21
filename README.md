@@ -47,10 +47,10 @@ $ ask "what stocks are currently held across my recent backtest runs?"
 
 ```mermaid
 flowchart LR
-    CLI[ask.py / python -m agent] -->|question| Loop[loop.run_agent]
+    CLI[ask / python -m agent] -->|question| Loop[loop.run_agent]
     Loop -->|stream| LLM[OpenAI-compatible<br/>local or remote]
     Loop -->|tool_calls| Tools[Tool registry]
-    Tools -->|@tool + Pydantic| Market[market.py]
+    Tools -->|decorator + Pydantic| Market[market.py]
     Tools --> Backtest[backtest.py]
     Tools --> DBMeta[db_meta.py]
     Tools --> Memory[memory.py]
@@ -59,7 +59,7 @@ flowchart LR
     Backtest -.-> DB
     DBMeta -.-> DB
     Sql -.-> DB
-    Loop --> Compact[compaction<br/>stage 1 → 2]
+    Loop --> Compact[compaction<br/>stage 1 then 2]
     Loop --> Session[session.py]
     Session -.->|daily rollover| Fs[sessions/*.json]
     Memory -.-> Md[memory.md]
