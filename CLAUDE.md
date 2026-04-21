@@ -1,8 +1,15 @@
 # CLAUDE.md — guidance for Claude Code on this project
 
-A local-LLM ReAct agent that queries a PostgreSQL stock/backtest DB. Entry
-point is `stock-agent` (or `python -m agent`); core loop is `agent/loop.py`; tools
-are under `agent/tools/`.
+A local-LLM ReAct agent — branded **Finn**, a quantitative stock research
+analyst — that queries a PostgreSQL stock/backtest DB plus Yahoo Finance
+news and SEC EDGAR filings. Entry point is `stock-agent` (or `python -m
+agent`); core loop is `agent/loop.py`; tools are under `agent/tools/`.
+
+Runs in two modes:
+- **One-shot**: `stock-agent "question"` — prints answer and exits.
+- **Interactive REPL**: `stock-agent` with no question — Finn banner,
+  slash commands (`/help`, `/exit`, `/reset`, `/session`, `/nosession`),
+  readline line editing where supported.
 
 ## Mental model
 
@@ -12,7 +19,8 @@ A single `run_agent(question)` invocation:
    injects today's date + current `memory.md` contents.
 2. Prepends it to any `prior_messages` (session resume) and appends the user
    question.
-3. Loops up to `max_iterations` (default 12):
+3. Loops up to `max_iterations` (from `Settings.max_iterations`, default 12,
+   overridable via the `MAX_ITERATIONS` env var or `--max-iterations` flag):
    a. Compact if needed (Stage 1 tool-result trim, then Stage 2 LLM summary).
    b. Stream one LLM turn (`_stream_turn`), accumulating content deltas +
       tool_call deltas.
@@ -53,10 +61,28 @@ agent/agent/              the installable package
     ├── backtest.py       backtest_results + strategies + holdings
     ├── db_meta.py        describe_table, sample_rows, list_analytics_columns
     ├── memory.py         remember()
+    ├── news.py           get_stock_news (Yahoo Finance via yfinance)
+    ├── sec.py            get_recent_filings + get_insider_transactions (SEC EDGAR via edgartools)
     └── sql.py            run_sql escape hatch
 tests/                    pytest unit tests
 evals/                    gold-set regression harness
 ```
+
+## Current tool count: 17
+
+Registered in `agent.tools.TOOLS` at import time via the `@tool` decorator.
+Keep `test_tool_registry.py:test_all_expected_tools_registered` in sync when
+adding or removing tools.
+
+## External data sources
+
+- **PostgreSQL** (read-only session, `stock` schema): analytics, symbols_info,
+  market_exposure, backtest_results, strategies, get_live_breakouts().
+- **Yahoo Finance** via `yfinance>=0.2.40` (see `tools/news.py`). Shape
+  handling supports both nested (`content{...}`) and legacy flat responses.
+- **SEC EDGAR** via `edgartools>=5.0` (see `tools/sec.py`). Compliance
+  requires `SEC_USER_AGENT` in `.env` with real contact info; the tool
+  calls `set_identity()` lazily on first invocation.
 
 ## Conventions and non-obvious decisions
 
@@ -76,6 +102,30 @@ evals/                    gold-set regression harness
   `json_array_elements(...)`. Documented in `agent/prompt.py`.
 - **Trade shape** is `{date, symbol, type, price, quantity, value}` with
   `type ∈ {'BUY','SELL'}`. `get_recent_backtest_holdings` relies on this.
+
+## CLI output modes
+
+Two verbosity levels besides `--quiet`:
+
+- **Default**: one line per iteration, composed AFTER tools resolve so blocked
+  duplicates can be flagged inline. E.g. `[iter 1] → get_insider_transactions(...)`.
+- **`--debug`**: multi-line trace with args + result summary per tool. The
+  `[iter N]` header prints up front (before tool calls) in this mode.
+
+The spinner (`loop.Spinner`) uses Unicode eighth-block bars on staggered sine
+waves. It starts BEFORE `client.chat.completions.create()` — that call blocks
+on the initial HTTP connect, so starting after would miss the blocking window.
+Stops on first `→ tool_name(...)` print (debug only) or on stream end.
+
+ANSI handling in `cli.py`:
+- `_ansi_supported()` → stdout is a TTY, `TERM` isn't dumb/empty, `NO_COLOR`
+  isn't set. If false, all color helpers become empty strings and readline is
+  skipped.
+- `TERM=xterm` override near the top of the module so the C-level libedit
+  "Cannot read termcap database" warning doesn't fire during imports. The
+  original TERM is preserved for the ANSI-detection check.
+- Prompt strings wrap ANSI codes with `\001`/`\002` so readline computes
+  prompt width correctly during line editing.
 
 ## Streaming + the `<think>` tag problem
 

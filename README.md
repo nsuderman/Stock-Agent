@@ -6,20 +6,36 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Typed: mypy](https://img.shields.io/badge/typed-mypy-blue.svg)](https://mypy-lang.org/)
 
-A local-LLM ReAct agent with tool access to a PostgreSQL stock/backtest
-database. Ask questions in natural language; the agent plans tool calls,
-reads the data, and answers. Built for a local llama.cpp / vLLM server;
-works with remote OpenAI-compatible endpoints too.
+Meet **Finn** — a local-LLM ReAct agent that acts as a quantitative stock
+research analyst. Finn has tool access to a PostgreSQL stock/backtest
+database, Yahoo Finance news, and SEC EDGAR filings. Ask questions in natural
+language; Finn plans tool calls, reads the data, and answers concisely. Built
+for a local llama.cpp / vLLM server; works with remote OpenAI-compatible
+endpoints too.
 
+**One-shot:**
 ```console
 $ stock-agent "what stocks are currently held across my recent backtest runs?"
-[iter 1]
-  → get_recent_backtest_holdings(...)
-    args: {"days_back": 7}
-    ← 9 row(s); cols: symbol, n_backtests, n_strategies, strategies, most_recent_run
-[iter 2]
-  EGBN and SATL are your highest-conviction cross-strategy signals — held in
-  28 and 26 of 43 recent backtests respectively...
+[iter 1] → get_recent_backtest_holdings(...)
+
+=== ANSWER ===
+EGBN and SATL are your highest-conviction cross-strategy signals — held in
+28 and 26 of 43 recent backtests respectively...
+```
+
+**Interactive REPL** (run `stock-agent` with no question):
+```
+    ███████╗██╗███╗   ██╗███╗   ██╗
+    ██╔════╝██║████╗  ██║████╗  ██║
+    █████╗  ██║██╔██╗ ██║██╔██╗ ██║
+    ██╔══╝  ██║██║╚██╗██║██║╚██╗██║
+    ██║     ██║██║ ╚████║██║ ╚████║
+    ╚═╝     ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝
+
+    STOCK AGENT · local-LLM quant research assistant
+    STATUS: ONLINE  |  MODEL: qwen3.6-35b-a3b  |  SESSION: 2026-04-21
+
+> has anyone at AAPL been selling shares?
 ```
 
 ## Highlights
@@ -29,20 +45,22 @@ $ stock-agent "what stocks are currently held across my recent backtest runs?"
   filings + insider transactions, and a read-only SQL escape hatch.
 - **Pydantic argument models** for every tool — OpenAI tool schemas are
   auto-generated; no hand-written JSON to drift out of sync.
-- **Streaming** output with live tool-call status so there's no 10-minute
-  silence on slow local LLMs.
+- **Interactive REPL** with branded banner, slash commands, readline line
+  editing, and session-aware context — or one-shot `stock-agent "question"`.
+- **Equalizer-bar spinner** while the stream blocks, then a compact one-line
+  tool trace per iteration (`--debug` for full args + result summary).
 - **Two-stage auto-compaction** — trims old tool results by summary, then
   falls back to LLM summarization if still over budget. Context-window size is
   probed from `/v1/models` at runtime (llama.cpp `--ctx-size` with alias
   matching).
-- **Daily sessions by default** — `stock-agent` resumes today's context
-  automatically; `--session <name>` pins a longer project.
+- **Daily sessions by default** — resumes today's context automatically;
+  `--session <name>` pins a longer-running named project.
 - **Persistent memory** (`memory.md`) loaded into every system prompt.
 - **Duplicate-call guard** — identical back-to-back tool calls are rejected
   with a synthetic error so ReAct loops can't spin forever.
 - **Read-only DB enforcement** at the PostgreSQL session level plus a
   write-keyword regex on `run_sql` — defense in depth.
-- **158 tests, 87% coverage**, ruff + mypy clean, CI on Python 3.10/3.11/3.12.
+- **197 tests, 87% coverage**, ruff + mypy clean, CI on Python 3.10/3.11/3.12.
 
 ## Architecture
 
@@ -110,6 +128,30 @@ stock-agent --max-iterations 20 "..." # default is 12
 
 If you prefer not to install the console script, `python -m agent "..."` is
 equivalent to `stock-agent "..."`.
+
+## Interactive mode
+
+Running `stock-agent` with no question drops into Finn's REPL:
+
+```bash
+stock-agent                 # daily session
+stock-agent --session deep-dive    # named session
+stock-agent --no-session           # ephemeral
+stock-agent --debug                # full per-tool trace
+```
+
+**Slash commands inside the REPL:**
+
+| Command | Action |
+|---|---|
+| `/help` | show the slash-command list |
+| `/exit`, `/quit` | end the session cleanly |
+| `/reset` | clear conversation context (keeps `memory.md`) |
+| `/session <name>` | save current, switch to named session |
+| `/nosession` | drop to ephemeral mode |
+
+Ctrl-D / Ctrl-C also exit cleanly. Arrow-key history + line editing via
+readline where available.
 
 ## Configuration
 
