@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.dmypy.json
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Agent runtime data (never commit)
+.env
+sessions/
+logs/
+
+# Keep the template and user-maintained memory file in git
+!.env.example
+!memory.md
+
+# pre-commit
+.pre-commit-cache/
+
+# Claude Code local settings (user/machine-specific, not project config)
+.claude/settings.local.json
