@@ -192,7 +192,7 @@ def test_duplicate_error_escalates_on_repeated_blocks():
             debug=False,
         )
         assert r2[0].blocked is True
-        assert "STOP" in r2[0].result["error"]
+        assert "STEP BACK" in r2[0].result["error"]
         assert block_counts[fp] == 2
     finally:
         TOOLS.pop("_repeat", None)
@@ -455,10 +455,13 @@ def test_run_agent_dispatches_parallel_tool_calls_from_one_turn(
 def test_run_agent_escapes_when_all_calls_are_blocked_duplicates(
     monkeypatch: pytest.MonkeyPatch, tmp_memory
 ):
-    """When every tool call in a turn is a blocked duplicate, the loop must
-    force a final-answer turn with tool_choice='none' and exit — no more
-    hammering the same call until max_iterations trips."""
+    """A single blocked duplicate should NOT terminate the loop — the agent
+    must keep reasoning and get another turn to try a different approach.
+    Only a genuinely runaway retry pattern (same fingerprint blocked past
+    the threshold) triggers the force-answer escape."""
     from unittest.mock import MagicMock
+
+    from agent.loop import DUPLICATE_HARD_ESCAPE_THRESHOLD
 
     TOOLS["_stuck"] = ToolEntry(
         name="_stuck",
@@ -487,21 +490,19 @@ def test_run_agent_escapes_when_all_calls_are_blocked_duplicates(
         chunk.choices = [choice]
         return chunk
 
-    # Turn 1: one tool call — executes, fp enters recent_calls.
-    # Turn 2: identical tool call — blocked. Loop must inject forced-answer msg.
-    # Turn 3 (forced, tool_choice='none'): model returns final text.
-    tool_call_payload = {
-        "index": 0,
-        "id": "c1",
-        "name": "_stuck",
-        "arguments": "{}",
-    }
-    turn1 = [_mk_chunk(tool_call={**tool_call_payload, "id": "c1"})]
-    turn2 = [_mk_chunk(tool_call={**tool_call_payload, "id": "c2"})]
-    turn3 = [_mk_chunk(content="giving up, here is what I have")]
+    payload = {"index": 0, "name": "_stuck", "arguments": "{}"}
+    # Turn 1 executes, then N retries all blocked. Threshold=4 → escape fires
+    # AFTER the 4th consecutive block (5th total emission of the same call).
+    turn_execute = [_mk_chunk(tool_call={**payload, "id": "c0"})]
+    blocked_turns = [
+        [_mk_chunk(tool_call={**payload, "id": f"c{j}"})]
+        for j in range(1, DUPLICATE_HARD_ESCAPE_THRESHOLD + 1)
+    ]
+    forced_final = [_mk_chunk(content="giving up, here is what I have")]
+    turns = [turn_execute, *blocked_turns, forced_final]
 
     client = MagicMock()
-    turn_iter = iter([turn1, turn2, turn3])
+    turn_iter = iter(turns)
     seen_kwargs: list[dict] = []
 
     def _create(**kwargs):
@@ -526,29 +527,110 @@ def test_run_agent_escapes_when_all_calls_are_blocked_duplicates(
 
     try:
         events: list[IterationEvent] = []
-        # max_iterations=10 deliberately — we want to prove the escape fires
-        # before that limit, not because of it.
         answer, messages = run_agent(
             "go",
             verbose=False,
-            max_iterations=10,
+            max_iterations=20,
             on_iteration=events.append,
         )
 
         assert answer == "giving up, here is what I have"
-        # Exactly 3 LLM calls: turn1, turn2, forced turn3. No more.
-        assert len(seen_kwargs) == 3
-        # Turn 3 was the forced final-answer turn.
-        assert seen_kwargs[2]["tool_choice"] == "none"
-        # The injected user message should be in the history right before turn 3.
-        assert any(
-            m.get("role") == "user" and "blocked duplicate" in m.get("content", "")
-            for m in messages
+        # 1 initial + threshold blocked retries + 1 forced final = threshold+2 LLM calls.
+        assert len(seen_kwargs) == DUPLICATE_HARD_ESCAPE_THRESHOLD + 2
+        # The escalated message must have reached the model during reasoning
+        # attempts (second block onwards) — prove the agent had room to pivot.
+        tool_responses = [m for m in messages if m.get("role") == "tool"]
+        escalated = [m for m in tool_responses if "STEP BACK" in m.get("content", "")]
+        assert escalated, (
+            "expected the escalated 'STEP BACK and reason' message to have been "
+            "delivered on repeat blocks before escape fired"
         )
-        # Iteration 2 should have a blocked record; iteration 3 is the forced
-        # final-answer emission.
-        blocked_iters = [ev for ev in events if any(r.blocked for r in ev.tool_calls)]
-        assert blocked_iters, "expected at least one iteration with a blocked call"
+        # Final turn used tool_choice='none'.
+        assert seen_kwargs[-1]["tool_choice"] == "none"
         assert events[-1].final_answer == "giving up, here is what I have"
     finally:
         TOOLS.pop("_stuck", None)
+
+
+def test_single_blocked_call_does_not_terminate_loop(monkeypatch: pytest.MonkeyPatch, tmp_memory):
+    """If a blocked call occurs but the model then emits a *different* call,
+    the loop must continue — it must NOT force a final answer after a single
+    block. This is what lets the agent reason-and-pivot around errors."""
+    from unittest.mock import MagicMock
+
+    exec_count = {"a": 0, "b": 0}
+
+    def _impl_a(_: _NoArgs) -> dict:
+        exec_count["a"] += 1
+        return {"from": "a"}
+
+    def _impl_b(_: _NoArgs) -> dict:
+        exec_count["b"] += 1
+        return {"from": "b"}
+
+    TOOLS["_pa"] = ToolEntry(
+        name="_pa", description="A.", model=_NoArgs, func=lambda **_: _impl_a(_NoArgs())
+    )
+    TOOLS["_pb"] = ToolEntry(
+        name="_pb", description="B.", model=_NoArgs, func=lambda **_: _impl_b(_NoArgs())
+    )
+
+    def _mk_chunk(content: str | None = None, tool_call: dict | None = None):
+        chunk = MagicMock()
+        delta = MagicMock()
+        delta.content = content
+        if tool_call is not None:
+            tc_mock = MagicMock()
+            tc_mock.index = tool_call["index"]
+            tc_mock.id = tool_call.get("id")
+            fn = MagicMock()
+            fn.name = tool_call.get("name")
+            fn.arguments = tool_call.get("arguments")
+            tc_mock.function = fn
+            delta.tool_calls = [tc_mock]
+        else:
+            delta.tool_calls = None
+        choice = MagicMock()
+        choice.delta = delta
+        chunk.choices = [choice]
+        return chunk
+
+    # Turn 1: execute _pa. Turn 2: retry _pa (blocked). Turn 3: pivot to _pb
+    # (executes). Turn 4: final answer.
+    turns = [
+        [_mk_chunk(tool_call={"index": 0, "id": "c1", "name": "_pa", "arguments": "{}"})],
+        [_mk_chunk(tool_call={"index": 0, "id": "c2", "name": "_pa", "arguments": "{}"})],
+        [_mk_chunk(tool_call={"index": 0, "id": "c3", "name": "_pb", "arguments": "{}"})],
+        [_mk_chunk(content="pivoted successfully")],
+    ]
+    client = MagicMock()
+    turn_iter = iter(turns)
+    seen_kwargs: list[dict] = []
+    client.chat.completions.create.side_effect = lambda **kw: (
+        seen_kwargs.append(kw) or iter(next(turn_iter))
+    )
+    client.models.list.return_value = MagicMock(
+        data=[
+            MagicMock(
+                **{
+                    "model_dump.return_value": {
+                        "id": "test-model",
+                        "status": {"args": ["--ctx-size", "131072"]},
+                    }
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr("agent.loop.create_client", lambda local=True: client)
+    monkeypatch.setattr("agent.loop.active_model", lambda local=True: "test-model")
+
+    try:
+        answer, _ = run_agent("go", verbose=False, max_iterations=10)
+        assert answer == "pivoted successfully"
+        assert exec_count["a"] == 1  # only the first executed; the retry was blocked
+        assert exec_count["b"] == 1  # pivot tool ran
+        # All four LLM turns used tool_choice='auto' (no forced termination).
+        assert all(kw.get("tool_choice", "auto") == "auto" for kw in seen_kwargs)
+    finally:
+        TOOLS.pop("_pa", None)
+        TOOLS.pop("_pb", None)

@@ -201,18 +201,30 @@ def _fingerprint(name: str, raw_args: str) -> str:
 
 
 _DUPLICATE_ERROR_FIRST = (
-    "Duplicate call: you just invoked this exact tool with these exact "
-    "arguments in one of the last 4 tool calls. The result has not changed. "
-    "Either use the prior result to answer the user, or try a different "
-    "tool / different arguments. If you already have enough data, STOP "
-    "calling tools and provide the final answer."
+    "Duplicate call: this tool + these exact arguments was already invoked "
+    "in one of the last 4 tool calls, so the result is unchanged. Do not "
+    "retry it verbatim. Reason first about WHY the prior result was "
+    "insufficient, then act on that reasoning — try a different tool, a "
+    "narrower or different date range / symbol / parameter, or synthesize "
+    "an answer from the earlier results you already have (stating any gap "
+    "plainly if one exists)."
 )
 _DUPLICATE_ERROR_REPEAT = (
-    "STOP. You have emitted this identical tool call {count} times in a row "
-    "and every one has been blocked. Retrying will not change anything. "
-    "Give the user a final answer NOW using what you already have — do not "
-    "emit any more tool calls."
+    "You have now emitted this identical call {count} times in a row — "
+    "every retry has been blocked and will keep being blocked. Retrying is "
+    "not the answer. STEP BACK and reason explicitly: (1) what question "
+    "are you actually trying to answer, (2) what data do you already have "
+    "from earlier tool results, (3) what DIFFERENT approach could fill the "
+    "gap — a different tool, different scope, or a partial answer with the "
+    "caveat stated. Then emit a concrete next step (different tool call OR "
+    "a final answer). Do not emit this same call again."
 )
+
+# Per-fingerprint block count that trips the runaway-loop escape. Must be
+# high enough that the model has room to reason / pivot on the escalated
+# error message before we force-terminate. 4 blocks = 5 total attempts at
+# the same call — clearly stuck.
+DUPLICATE_HARD_ESCAPE_THRESHOLD = 4
 
 
 def _duplicate_error(count: int) -> dict[str, str]:
@@ -583,20 +595,27 @@ def _run_agent_inner(
 
         _emit(IterationEvent(iteration=i, tool_calls=records, final_answer=None))
 
-        # Escape hatch: if the model emitted only duplicate-blocked calls this
-        # turn, it's stuck re-hammering. Force a tool-free final-answer turn
-        # so the user gets something useful out of whatever did succeed before.
-        if records and all(r.blocked for r in records):
+        # Runaway-loop safety net: only fire if a SINGLE fingerprint has been
+        # blocked past the threshold. Gives the model multiple chances to
+        # reason through the escalated error message and pivot to a different
+        # tool / args before we force-terminate. An all-blocked iteration by
+        # itself is NOT enough — the agent should keep reasoning.
+        max_block_count = max(block_counts.values(), default=0)
+        if max_block_count >= DUPLICATE_HARD_ESCAPE_THRESHOLD:
             if verbose:
-                _print(f"[iter {i}] all calls blocked — forcing final answer.")
+                _print(
+                    f"[iter {i}] runaway loop detected (fp blocked "
+                    f"×{max_block_count}) — forcing final answer."
+                )
             messages.append(
                 {
                     "role": "user",
                     "content": (
-                        "Every tool call in your previous turn was a blocked "
-                        "duplicate. Do not call any more tools. Answer me now "
-                        "with whatever you have from earlier tool results — "
-                        "if something is missing, say so plainly."
+                        f"You have retried the same tool call {max_block_count} "
+                        "times in a row and every attempt was blocked. Stop "
+                        "retrying. Answer me now using whatever you have from "
+                        "earlier tool results — if something is missing, say "
+                        "so plainly."
                     ),
                 }
             )
