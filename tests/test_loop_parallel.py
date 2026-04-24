@@ -55,7 +55,7 @@ def test_parallel_dispatch_actually_runs_concurrently():
 
         t0 = time.monotonic()
         records = _dispatch_tool_calls(
-            tool_calls, recent, max_workers=4, verbose=False, debug=False
+            tool_calls, recent, {}, max_workers=4, verbose=False, debug=False
         )
         elapsed_ms = (time.monotonic() - t0) * 1000
 
@@ -84,7 +84,7 @@ def test_dispatch_preserves_original_order_even_when_fast_tools_finish_first():
         ]
         recent: deque[str] = deque(maxlen=4)
         records = _dispatch_tool_calls(
-            tool_calls, recent, max_workers=4, verbose=False, debug=False
+            tool_calls, recent, {}, max_workers=4, verbose=False, debug=False
         )
         assert [r.result["tag"] for r in records] == ["slow", "fast1", "fast2"]
     finally:
@@ -112,7 +112,7 @@ def test_within_batch_duplicate_is_blocked():
         ]
         recent: deque[str] = deque(maxlen=4)
         records = _dispatch_tool_calls(
-            tool_calls, recent, max_workers=4, verbose=False, debug=False
+            tool_calls, recent, {}, max_workers=4, verbose=False, debug=False
         )
         assert records[0].blocked is False
         assert records[1].blocked is True
@@ -145,12 +145,87 @@ def test_dispatch_against_history_blocks_repeat():
         recent.append(_fingerprint("_hcount", "{}"))
 
         records = _dispatch_tool_calls(
-            tool_calls, recent, max_workers=4, verbose=False, debug=False
+            tool_calls, recent, {}, max_workers=4, verbose=False, debug=False
         )
         assert records[0].blocked is True
         assert call_count["n"] == 0
     finally:
         TOOLS.pop("_hcount", None)
+
+
+def test_duplicate_error_escalates_on_repeated_blocks():
+    """First block uses the gentle message; second+ escalate to the STOP variant."""
+    from agent.loop import _fingerprint
+
+    TOOLS["_repeat"] = ToolEntry(
+        name="_repeat",
+        description="Repeat.",
+        model=_NoArgs,
+        func=lambda **_: {"ok": True},
+    )
+    try:
+        recent: deque[str] = deque(maxlen=4)
+        block_counts: dict[str, int] = {}
+        fp = _fingerprint("_repeat", "{}")
+        recent.append(fp)  # pretend this call just executed last round
+
+        # First re-attempt → blocked, gentle message.
+        r1 = _dispatch_tool_calls(
+            [_tc(0, "_repeat", "{}")],
+            recent,
+            block_counts,
+            max_workers=1,
+            verbose=False,
+            debug=False,
+        )
+        assert r1[0].blocked is True
+        assert "Duplicate call" in r1[0].result["error"]
+        assert block_counts[fp] == 1
+
+        # Second re-attempt → still blocked, escalated message.
+        r2 = _dispatch_tool_calls(
+            [_tc(1, "_repeat", "{}")],
+            recent,
+            block_counts,
+            max_workers=1,
+            verbose=False,
+            debug=False,
+        )
+        assert r2[0].blocked is True
+        assert "STOP" in r2[0].result["error"]
+        assert block_counts[fp] == 2
+    finally:
+        TOOLS.pop("_repeat", None)
+
+
+def test_block_counter_resets_when_fingerprint_executes_again():
+    """Once a blocked fp ages out and executes, its counter resets."""
+    from agent.loop import _fingerprint
+
+    TOOLS["_reset"] = ToolEntry(
+        name="_reset",
+        description="Reset.",
+        model=_NoArgs,
+        func=lambda **_: {"ok": True},
+    )
+    try:
+        recent: deque[str] = deque(maxlen=4)
+        block_counts: dict[str, int] = {}
+        fp = _fingerprint("_reset", "{}")
+        block_counts[fp] = 5  # simulate prior blocks
+
+        # fp not in recent_calls, so it executes — counter should be cleared.
+        _dispatch_tool_calls(
+            [_tc(0, "_reset", "{}")],
+            recent,
+            block_counts,
+            max_workers=1,
+            verbose=False,
+            debug=False,
+        )
+        assert fp not in block_counts
+    finally:
+        TOOLS.pop("_reset", None)
 
 
 def test_tool_exception_becomes_error_result():
@@ -164,7 +239,7 @@ def test_tool_exception_becomes_error_result():
     try:
         tool_calls = [_tc(0, "_boom", "{}")]
         records = _dispatch_tool_calls(
-            tool_calls, deque(maxlen=4), max_workers=4, verbose=False, debug=False
+            tool_calls, deque(maxlen=4), {}, max_workers=4, verbose=False, debug=False
         )
         assert records[0].blocked is False
         assert "error" in records[0].result
@@ -210,7 +285,7 @@ def test_context_var_propagates_into_worker_threads():
                 _tc(2, "_check_ctx", '{"dummy":2}'),
             ]
             _dispatch_tool_calls(
-                tool_calls, deque(maxlen=4), max_workers=4, verbose=False, debug=False
+                tool_calls, deque(maxlen=4), {}, max_workers=4, verbose=False, debug=False
             )
         assert len(seen_stores) == 3
         assert all(s is store for s in seen_stores)
@@ -231,7 +306,7 @@ def test_single_call_uses_inline_dispatch():
     try:
         tool_calls = [_tc(0, "_single", "{}")]
         records = _dispatch_tool_calls(
-            tool_calls, deque(maxlen=4), max_workers=8, verbose=False, debug=False
+            tool_calls, deque(maxlen=4), {}, max_workers=8, verbose=False, debug=False
         )
         assert records[0].result == {"ok": True}
         assert records[0].blocked is False
@@ -263,7 +338,9 @@ def test_max_workers_one_forces_sequential(monkeypatch: pytest.MonkeyPatch):
             _tc(0, "_seq", '{"ms": 30, "tag": "a"}'),
             _tc(1, "_seq", '{"ms": 30, "tag": "b"}'),
         ]
-        _dispatch_tool_calls(tool_calls, deque(maxlen=4), max_workers=1, verbose=False, debug=False)
+        _dispatch_tool_calls(
+            tool_calls, deque(maxlen=4), {}, max_workers=1, verbose=False, debug=False
+        )
         # No interleaving when workers=1.
         assert order == ["enter:a", "exit:a", "enter:b", "exit:b"]
     finally:
@@ -373,3 +450,105 @@ def test_run_agent_dispatches_parallel_tool_calls_from_one_turn(
         assert [r.args["tag"] for r in events[0].tool_calls] == ["x", "y"]
     finally:
         TOOLS.pop("_e2e", None)
+
+
+def test_run_agent_escapes_when_all_calls_are_blocked_duplicates(
+    monkeypatch: pytest.MonkeyPatch, tmp_memory
+):
+    """When every tool call in a turn is a blocked duplicate, the loop must
+    force a final-answer turn with tool_choice='none' and exit — no more
+    hammering the same call until max_iterations trips."""
+    from unittest.mock import MagicMock
+
+    TOOLS["_stuck"] = ToolEntry(
+        name="_stuck",
+        description="Stuck.",
+        model=_NoArgs,
+        func=lambda **_: {"v": 1},
+    )
+
+    def _mk_chunk(content: str | None = None, tool_call: dict | None = None):
+        chunk = MagicMock()
+        delta = MagicMock()
+        delta.content = content
+        if tool_call is not None:
+            tc_mock = MagicMock()
+            tc_mock.index = tool_call["index"]
+            tc_mock.id = tool_call.get("id")
+            fn = MagicMock()
+            fn.name = tool_call.get("name")
+            fn.arguments = tool_call.get("arguments")
+            tc_mock.function = fn
+            delta.tool_calls = [tc_mock]
+        else:
+            delta.tool_calls = None
+        choice = MagicMock()
+        choice.delta = delta
+        chunk.choices = [choice]
+        return chunk
+
+    # Turn 1: one tool call — executes, fp enters recent_calls.
+    # Turn 2: identical tool call — blocked. Loop must inject forced-answer msg.
+    # Turn 3 (forced, tool_choice='none'): model returns final text.
+    tool_call_payload = {
+        "index": 0,
+        "id": "c1",
+        "name": "_stuck",
+        "arguments": "{}",
+    }
+    turn1 = [_mk_chunk(tool_call={**tool_call_payload, "id": "c1"})]
+    turn2 = [_mk_chunk(tool_call={**tool_call_payload, "id": "c2"})]
+    turn3 = [_mk_chunk(content="giving up, here is what I have")]
+
+    client = MagicMock()
+    turn_iter = iter([turn1, turn2, turn3])
+    seen_kwargs: list[dict] = []
+
+    def _create(**kwargs):
+        seen_kwargs.append(kwargs)
+        return iter(next(turn_iter))
+
+    client.chat.completions.create.side_effect = _create
+    client.models.list.return_value = MagicMock(
+        data=[
+            MagicMock(
+                **{
+                    "model_dump.return_value": {
+                        "id": "test-model",
+                        "status": {"args": ["--ctx-size", "131072"]},
+                    }
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr("agent.loop.create_client", lambda local=True: client)
+    monkeypatch.setattr("agent.loop.active_model", lambda local=True: "test-model")
+
+    try:
+        events: list[IterationEvent] = []
+        # max_iterations=10 deliberately — we want to prove the escape fires
+        # before that limit, not because of it.
+        answer, messages = run_agent(
+            "go",
+            verbose=False,
+            max_iterations=10,
+            on_iteration=events.append,
+        )
+
+        assert answer == "giving up, here is what I have"
+        # Exactly 3 LLM calls: turn1, turn2, forced turn3. No more.
+        assert len(seen_kwargs) == 3
+        # Turn 3 was the forced final-answer turn.
+        assert seen_kwargs[2]["tool_choice"] == "none"
+        # The injected user message should be in the history right before turn 3.
+        assert any(
+            m.get("role") == "user" and "blocked duplicate" in m.get("content", "")
+            for m in messages
+        )
+        # Iteration 2 should have a blocked record; iteration 3 is the forced
+        # final-answer emission.
+        blocked_iters = [ev for ev in events if any(r.blocked for r in ev.tool_calls)]
+        assert blocked_iters, "expected at least one iteration with a blocked call"
+        assert events[-1].final_answer == "giving up, here is what I have"
+    finally:
+        TOOLS.pop("_stuck", None)

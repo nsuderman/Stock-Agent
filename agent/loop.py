@@ -200,20 +200,32 @@ def _fingerprint(name: str, raw_args: str) -> str:
     return hashlib.md5(f"{name}|{canonical}".encode()).hexdigest()
 
 
-_DUPLICATE_ERROR = {
-    "error": (
-        "Duplicate call: you just invoked this exact tool with these exact "
-        "arguments in one of the last 4 tool calls. The result has not changed. "
-        "Either use the prior result to answer the user, or try a different "
-        "tool / different arguments. If you already have enough data, STOP "
-        "calling tools and provide the final answer."
-    )
-}
+_DUPLICATE_ERROR_FIRST = (
+    "Duplicate call: you just invoked this exact tool with these exact "
+    "arguments in one of the last 4 tool calls. The result has not changed. "
+    "Either use the prior result to answer the user, or try a different "
+    "tool / different arguments. If you already have enough data, STOP "
+    "calling tools and provide the final answer."
+)
+_DUPLICATE_ERROR_REPEAT = (
+    "STOP. You have emitted this identical tool call {count} times in a row "
+    "and every one has been blocked. Retrying will not change anything. "
+    "Give the user a final answer NOW using what you already have — do not "
+    "emit any more tool calls."
+)
+
+
+def _duplicate_error(count: int) -> dict[str, str]:
+    """Block-response payload, escalated on repeated blocks of the same fingerprint."""
+    if count >= 2:
+        return {"error": _DUPLICATE_ERROR_REPEAT.format(count=count)}
+    return {"error": _DUPLICATE_ERROR_FIRST}
 
 
 def _dispatch_tool_calls(
     tool_calls: list[dict],
     recent_calls: deque[str],
+    block_counts: dict[str, int],
     *,
     max_workers: int,
     verbose: bool,
@@ -224,6 +236,9 @@ def _dispatch_tool_calls(
     - Parses args + fingerprints up front. A call is blocked if its fingerprint
       matches `recent_calls` OR another call earlier in the same batch (the
       model emitted the identical call twice in one turn).
+    - `block_counts` tracks consecutive blocks per fingerprint across the whole
+      run; the synthetic error response escalates at count >= 2 to break the
+      model out of "hammer the same call forever" loops.
     - Non-blocked calls run concurrently in a ThreadPoolExecutor; tools are
       I/O-bound (PG, yfinance, SEC EDGAR), so a thread pool is the right fit.
     - Each worker runs inside a per-task copy of the main thread's ContextVar
@@ -235,6 +250,7 @@ def _dispatch_tool_calls(
     n = len(tool_calls)
     parsed: list[dict[str, Any]] = []
     blocked_flags: list[bool] = []
+    fingerprints: list[str] = []
     seen_in_batch: set[str] = set()
 
     for tc in tool_calls:
@@ -247,12 +263,18 @@ def _dispatch_tool_calls(
 
         fp = _fingerprint(name, raw_args)
         blocked = fp in recent_calls or fp in seen_in_batch
-        if not blocked:
+        if blocked:
+            block_counts[fp] = block_counts.get(fp, 0) + 1
+        else:
             seen_in_batch.add(fp)
             recent_calls.append(fp)
+            # A fingerprint that was previously blocked has now aged out and
+            # executed — reset its counter so a fresh re-block starts at 1.
+            block_counts.pop(fp, None)
 
         parsed.append({"name": name, "args": args, "raw_args": raw_args})
         blocked_flags.append(blocked)
+        fingerprints.append(fp)
 
         if verbose and debug:
             arg_preview = raw_args if len(raw_args) <= 140 else raw_args[:140] + "..."
@@ -287,10 +309,14 @@ def _dispatch_tool_calls(
     records: list[ToolCallRecord] = []
     for i in range(n):
         blocked = blocked_flags[i]
-        result = dict(_DUPLICATE_ERROR) if blocked else results[i]
+        if blocked:
+            count = block_counts[fingerprints[i]]
+            result = _duplicate_error(count)
+        else:
+            result = results[i]
         if verbose and debug:
             if blocked:
-                _print("    ← BLOCKED: duplicate tool call")
+                _print(f"    ← BLOCKED: duplicate tool call (×{block_counts[fingerprints[i]]})")
             else:
                 _print(f"    ← {_result_summary(result)}")
         records.append(
@@ -313,18 +339,23 @@ def _stream_turn(
     local: bool,
     verbose: bool,
     debug: bool,
+    tool_choice: str = "auto",
 ) -> tuple[str, list[dict] | None]:
     """Stream one LLM turn. Returns (content_str, tool_calls_list|None).
 
     Content (including <think> blocks and model narration) is accumulated silently
     so the user sees only tool-call status. The final answer is rendered by the
     caller once the last iteration returns with no tool_calls.
+
+    `tool_choice="none"` forces a final-answer turn (no tool calls allowed) —
+    used by the main loop to break out when every call in an iteration was
+    blocked as a duplicate.
     """
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "tools": openai_tool_schemas(),
-        "tool_choice": "auto",
+        "tool_choice": tool_choice,
         "temperature": 0.3,
         "stream": True,
     }
@@ -487,6 +518,7 @@ def _run_agent_inner(
     messages.append({"role": "user", "content": question})
 
     recent_calls: deque[str] = deque(maxlen=4)
+    block_counts: dict[str, int] = {}
     status_cb = _print if verbose else None
 
     def _emit(event: IterationEvent) -> None:
@@ -526,6 +558,7 @@ def _run_agent_inner(
         records = _dispatch_tool_calls(
             tool_calls,
             recent_calls,
+            block_counts,
             max_workers=max_tool_concurrency,
             verbose=verbose,
             debug=debug,
@@ -549,6 +582,36 @@ def _run_agent_inner(
             _print(f"[iter {i}] → {', '.join(summary_parts)}")
 
         _emit(IterationEvent(iteration=i, tool_calls=records, final_answer=None))
+
+        # Escape hatch: if the model emitted only duplicate-blocked calls this
+        # turn, it's stuck re-hammering. Force a tool-free final-answer turn
+        # so the user gets something useful out of whatever did succeed before.
+        if records and all(r.blocked for r in records):
+            if verbose:
+                _print(f"[iter {i}] all calls blocked — forcing final answer.")
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Every tool call in your previous turn was a blocked "
+                        "duplicate. Do not call any more tools. Answer me now "
+                        "with whatever you have from earlier tool results — "
+                        "if something is missing, say so plainly."
+                    ),
+                }
+            )
+            final_content, _ignored = _stream_turn(
+                client,
+                model,
+                messages,
+                local=local,
+                verbose=verbose,
+                debug=debug,
+                tool_choice="none",
+            )
+            messages.append({"role": "assistant", "content": final_content or ""})
+            _emit(IterationEvent(iteration=i + 1, tool_calls=[], final_answer=final_content or ""))
+            return final_content or "", messages
 
     stop_msg = "Stopped: reached max_iterations without a final answer."
     _emit(IterationEvent(iteration=max_iterations, tool_calls=[], final_answer=stop_msg))
