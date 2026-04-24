@@ -97,6 +97,25 @@ class TestStage2Summarize:
         assert n > 0
         assert "failed" in result[1]["content"].lower()
 
+    def test_transcript_capped_on_massive_history(self):
+        """With a huge conversation and a small cap, the transcript sent to the
+        summarizer must be truncated rather than submitted whole."""
+        messages = _build_heavy_conversation(n_pairs=20, payload_size=10_000)
+        client = _mk_client_for_summary("capped summary")
+        stage2_summarize(
+            messages,
+            client=client,
+            model="test-model",
+            local=True,
+            keep_recent=3,
+            max_transcript_chars=5_000,
+        )
+        # Inspect what we actually sent to the LLM.
+        (_, kwargs) = client.chat.completions.create.call_args
+        user_msg = kwargs["messages"][1]["content"]
+        assert len(user_msg) < 6_000
+        assert "omitted" in user_msg
+
 
 class TestCompactIfNeeded:
     def test_noop_when_under_budget(self, monkeypatch):

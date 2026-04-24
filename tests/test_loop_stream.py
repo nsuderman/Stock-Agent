@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent.loop import run_agent
+from agent.loop import IterationEvent, run_agent
 
 
 def _mk_chunk(content: str | None = None, tool_call: dict | None = None):
@@ -218,3 +218,148 @@ def test_think_tags_stripped_from_history(monkeypatch: pytest.MonkeyPatch, tmp_m
     assert "visible answer" in answer
     last_assistant = [m for m in messages if m["role"] == "assistant"][-1]
     assert "<think>" not in last_assistant["content"]
+
+
+class TestOnIterationCallback:
+    def test_single_turn_fires_final_event(self, monkeypatch: pytest.MonkeyPatch, tmp_memory):
+        turns = [[_mk_chunk(content="direct answer")]]
+        client = _mk_client(turns)
+        monkeypatch.setattr("agent.loop.create_client", lambda local=True: client)
+
+        events: list[IterationEvent] = []
+        run_agent("hi", verbose=False, on_iteration=events.append)
+
+        assert len(events) == 1
+        assert events[0].iteration == 1
+        assert events[0].tool_calls == []
+        assert events[0].final_answer == "direct answer"
+
+    def test_tool_call_then_answer_fires_two_events(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_memory
+    ):
+        from pydantic import BaseModel
+
+        from agent.tools.base import TOOLS, ToolEntry
+
+        class EchoArgs(BaseModel):
+            msg: str
+
+        TOOLS["_echo2"] = ToolEntry(
+            name="_echo2",
+            description="Echo a message.",
+            model=EchoArgs,
+            func=lambda **kw: {"echo": EchoArgs(**kw).msg},
+        )
+        try:
+            turn1 = [
+                _mk_chunk(
+                    tool_call={
+                        "index": 0,
+                        "id": "c1",
+                        "name": "_echo2",
+                        "arguments": '{"msg": "ping"}',
+                    }
+                )
+            ]
+            turn2 = [_mk_chunk(content="Got: ping")]
+            client = _mk_client([turn1, turn2])
+            monkeypatch.setattr("agent.loop.create_client", lambda local=True: client)
+
+            events: list[IterationEvent] = []
+            run_agent("do echo", verbose=False, on_iteration=events.append)
+
+            assert len(events) == 2
+            # Iteration 1: one tool call, no final answer yet.
+            assert events[0].iteration == 1
+            assert len(events[0].tool_calls) == 1
+            rec = events[0].tool_calls[0]
+            assert rec.name == "_echo2"
+            assert rec.args == {"msg": "ping"}
+            assert rec.blocked is False
+            assert rec.result == {"echo": "ping"}
+            assert events[0].final_answer is None
+            # Iteration 2: terminal answer.
+            assert events[1].iteration == 2
+            assert events[1].final_answer == "Got: ping"
+            assert events[1].tool_calls == []
+        finally:
+            TOOLS.pop("_echo2", None)
+
+    def test_callback_failure_does_not_break_loop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_memory
+    ):
+        """A buggy consumer callback must not take down the agent."""
+        turns = [[_mk_chunk(content="still fine")]]
+        client = _mk_client(turns)
+        monkeypatch.setattr("agent.loop.create_client", lambda local=True: client)
+
+        def _boom(_event: IterationEvent) -> None:
+            raise RuntimeError("consumer bug")
+
+        answer, _ = run_agent("hi", verbose=False, on_iteration=_boom)
+        assert answer == "still fine"
+
+
+class TestMemoryStoreInjection:
+    def test_injected_store_is_used_for_system_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_memory
+    ):
+        """The prompt for this run should reflect the injected store, not the file."""
+        from agent.memory import MemoryStore
+
+        class FakeStore:
+            def read(self) -> str:
+                return "INJECTED_MEMORY_MARKER"
+
+            def append(self, fact: str) -> None:
+                pass
+
+        turns = [[_mk_chunk(content="ok")]]
+        client = _mk_client(turns)
+        monkeypatch.setattr("agent.loop.create_client", lambda local=True: client)
+
+        _, messages = run_agent(
+            "q",
+            verbose=False,
+            memory_store=FakeStore(),  # type: ignore[arg-type]
+        )
+        assert "INJECTED_MEMORY_MARKER" in messages[0]["content"]
+        # Verify the duck-typed store satisfies the protocol.
+        assert isinstance(FakeStore(), MemoryStore)
+
+    def test_remember_tool_writes_to_injected_store(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_memory
+    ):
+        """When the LLM calls `remember`, the injected store receives the fact,
+        not the on-disk memory.md."""
+        appended: list[str] = []
+
+        class CaptureStore:
+            def read(self) -> str:
+                return ""
+
+            def append(self, fact: str) -> None:
+                appended.append(fact)
+
+        turn1 = [
+            _mk_chunk(
+                tool_call={
+                    "index": 0,
+                    "id": "c1",
+                    "name": "remember",
+                    "arguments": '{"fact": "user trades longs only"}',
+                }
+            )
+        ]
+        turn2 = [_mk_chunk(content="saved.")]
+        client = _mk_client([turn1, turn2])
+        monkeypatch.setattr("agent.loop.create_client", lambda local=True: client)
+
+        run_agent(
+            "save this",
+            verbose=False,
+            memory_store=CaptureStore(),  # type: ignore[arg-type]
+        )
+        assert appended == ["user trades longs only"]
+        # Critically: the on-disk file is untouched.
+        assert "user trades longs only" not in tmp_memory.read_text(encoding="utf-8")

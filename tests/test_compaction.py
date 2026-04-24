@@ -4,56 +4,12 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from agent.compaction import (
     THINK_RE,
-    ThinkFilter,
     estimate_tokens,
     short_tool_summary,
     stage1_trim,
 )
-
-
-class TestThinkFilter:
-    def test_single_chunk_strip(self):
-        f = ThinkFilter()
-        out = f.feed("<think>hidden</think>visible") + f.flush()
-        assert out == "visible"
-
-    def test_split_across_chunks(self):
-        f = ThinkFilter()
-        out = f.feed("hello <thi") + f.feed("nk>secret</think> world") + f.flush()
-        assert out == "hello  world"
-
-    def test_no_tags_passthrough(self):
-        f = ThinkFilter()
-        out = f.feed("plain text with no tags") + f.flush()
-        assert out == "plain text with no tags"
-
-    def test_empty_think_block(self):
-        f = ThinkFilter()
-        out = f.feed("<think>\n</think>\nThe answer is 42.") + f.flush()
-        assert out == "\nThe answer is 42."
-
-    def test_char_by_char_stream(self):
-        """Simulate one-char-at-a-time streaming."""
-        f = ThinkFilter()
-        out = ""
-        for c in "<think>abc</think>long enough trailing text here":
-            out += f.feed(c)
-        out += f.flush()
-        assert out == "long enough trailing text here"
-
-    def test_multiple_think_blocks(self):
-        f = ThinkFilter()
-        out = f.feed("<think>a</think>mid<think>b</think>end") + f.flush()
-        assert out == "midend"
-
-    def test_unterminated_think_dropped_on_flush(self):
-        f = ThinkFilter()
-        out = f.feed("before<think>never closes") + f.flush()
-        assert out == "before"
 
 
 class TestEstimateTokens:
@@ -176,17 +132,3 @@ class TestThinkRegex:
     def test_strips_multiline(self):
         text = "before\n<think>\nmultiple\nlines\n</think>\nafter"
         assert "think" not in THINK_RE.sub("", text)
-
-
-@pytest.mark.parametrize(
-    "text,expected",
-    [
-        ("", ""),
-        ("<think></think>", ""),
-        ("hello", "hello"),
-    ],
-)
-def test_think_filter_edge_cases(text: str, expected: str):
-    f = ThinkFilter()
-    out = f.feed(text) + f.flush()
-    assert out == expected

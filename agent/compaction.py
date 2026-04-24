@@ -14,52 +14,10 @@ from agent.logging_setup import get_logger
 
 log = get_logger(__name__)
 
+# Reasoning models (Qwen3, DeepSeek-R1 family) emit <think>...</think> blocks.
+# We accumulate stream content silently and strip them post-hoc before storing
+# to history and rendering the final answer.
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
-class ThinkFilter:
-    """Strip <think>...</think> blocks from a streamed text, chunk by chunk.
-
-    Qwen3 reasoning models emit these even when empty. This hides them live
-    without waiting for the full response.
-    """
-
-    _OPEN = "<think>"
-    _CLOSE = "</think>"
-    _HOLDBACK = max(len(_OPEN), len(_CLOSE))
-
-    def __init__(self) -> None:
-        self.buf = ""
-        self.inside = False
-
-    def feed(self, chunk: str) -> str:
-        self.buf += chunk
-        out: list[str] = []
-        while True:
-            if self.inside:
-                idx = self.buf.find(self._CLOSE)
-                if idx < 0:
-                    if len(self.buf) > self._HOLDBACK:
-                        self.buf = self.buf[-self._HOLDBACK :]
-                    return "".join(out)
-                self.buf = self.buf[idx + len(self._CLOSE) :]
-                self.inside = False
-            else:
-                idx = self.buf.find(self._OPEN)
-                if idx < 0:
-                    if len(self.buf) > self._HOLDBACK:
-                        out.append(self.buf[: -self._HOLDBACK])
-                        self.buf = self.buf[-self._HOLDBACK :]
-                    return "".join(out)
-                out.append(self.buf[:idx])
-                self.buf = self.buf[idx + len(self._OPEN) :]
-                self.inside = True
-
-    def flush(self) -> str:
-        if self.inside:
-            return ""
-        out, self.buf = self.buf, ""
-        return out
 
 
 def estimate_tokens(messages: list[dict]) -> int:
@@ -117,8 +75,16 @@ def stage2_summarize(
     model: str,
     local: bool,
     keep_recent: int,
+    max_transcript_chars: int = 80_000,
 ) -> tuple[list[dict], int]:
-    """Ask the LLM to summarize everything before the last `keep_recent` messages."""
+    """Ask the LLM to summarize everything before the last `keep_recent` messages.
+
+    `max_transcript_chars` caps the transcript we send to the summarizer. On very
+    long histories, the transcript would otherwise exceed the context window and
+    the summarization call itself would fail. When the cap kicks in, we keep the
+    MOST RECENT portion of the old block (the tail) since that's what's most
+    relevant for continuing the conversation.
+    """
     if len(messages) <= keep_recent + 2:
         return messages, 0
 
@@ -142,6 +108,17 @@ def stage2_summarize(
             prefix = f"[{role}" + (f":{name}]" if name else "]")
             transcript_parts.append(f"{prefix} {content}")
     transcript = "\n\n".join(transcript_parts)
+    if len(transcript) > max_transcript_chars:
+        dropped = len(transcript) - max_transcript_chars
+        # Keep the tail of the transcript — most relevant to what the user is
+        # working on right now.
+        transcript = (
+            f"[omitted {dropped} chars of earlier history to fit context]\n\n"
+            + transcript[-max_transcript_chars:]
+        )
+        log.info(
+            "Stage 2 transcript capped at %d chars (dropped %d)", max_transcript_chars, dropped
+        )
 
     summary_req: list[dict[str, Any]] = [
         {
@@ -205,12 +182,17 @@ def compact_if_needed(
     if after_s1 <= budget:
         return messages
 
+    # Cap the transcript so the summarization call itself doesn't overflow the
+    # window. Reserve ~1500 tokens (~6000 chars) for the summary prompt + response
+    # + safety margin, then convert the remaining token budget to chars (×4).
+    max_transcript_chars = max(4_000, (window - 1500) * 4)
     messages, n_collapsed = stage2_summarize(
         messages,
         client=client,
         model=model,
         local=local,
         keep_recent=s.compact_keep_recent,
+        max_transcript_chars=max_transcript_chars,
     )
     after_s2 = estimate_tokens(messages)
     if n_collapsed:

@@ -1,10 +1,12 @@
-"""Tests for loop-level utilities (fingerprint, summary formatter, trunc)."""
+"""Tests for loop-level utilities (fingerprint, summary formatter, serializer)."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from agent.loop import _fingerprint, _result_summary, _trunc
+from agent.loop import _fingerprint, _result_summary, _serialize_tool_result
 
 
 class TestFingerprint:
@@ -62,18 +64,36 @@ class TestResultSummary:
         assert _result_summary("hello") == "hello"
 
 
-class TestTrunc:
-    def test_under_limit(self):
-        assert _trunc("short", n=100) == "short"
+class TestSerializeToolResult:
+    def test_small_result_round_trips_intact(self):
+        result = {"rows": [{"symbol": "AAPL", "price": 200}], "count": 1}
+        out = _serialize_tool_result(result, limit=1000)
+        assert json.loads(out) == result
 
-    def test_over_limit(self):
-        out = _trunc("x" * 200, n=50)
-        assert len(out) < 200
-        assert "truncated" in out
+    def test_oversized_result_returns_valid_json_envelope(self):
+        """The key bug we're guarding against: truncating mid-JSON string."""
+        result = {"rows": [{"x": "y" * 50000}]}
+        out = _serialize_tool_result(result, limit=500)
+        parsed = json.loads(out)  # Must still parse.
+        assert parsed["truncated"] is True
+        assert parsed["original_size_chars"] > 500
+        assert "preview" in parsed
+        assert isinstance(parsed["preview"], str)
 
-    @pytest.mark.parametrize("n", [1, 10, 100, 1000])
-    def test_respects_limit(self, n: int):
-        text = "x" * 2000
-        out = _trunc(text, n=n)
-        # Output is either the whole string or prefix + truncation note.
-        assert len(out) >= min(len(text), n)
+    def test_envelope_fits_in_limit(self):
+        result = {"big": "x" * 20000}
+        out = _serialize_tool_result(result, limit=1000)
+        # We allow some envelope overhead but the output should be close to limit.
+        assert len(out) < 1500
+
+    def test_exactly_at_limit_not_truncated(self):
+        result = {"k": "x" * 10}
+        raw = json.dumps(result, default=str)
+        out = _serialize_tool_result(result, limit=len(raw))
+        assert out == raw
+
+    @pytest.mark.parametrize("limit", [300, 1000, 5000])
+    def test_always_valid_json(self, limit: int):
+        result = {"payload": "x" * 100_000}
+        out = _serialize_tool_result(result, limit=limit)
+        json.loads(out)  # Should never raise.
