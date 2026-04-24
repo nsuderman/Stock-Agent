@@ -47,6 +47,7 @@ coverage.xml
 .env
 sessions/
 logs/
+charts/
 
 # Keep the template and user-maintained memory file in git
 !.env.example
