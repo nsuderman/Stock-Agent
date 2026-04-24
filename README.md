@@ -55,12 +55,15 @@ EGBN and SATL are your highest-conviction cross-strategy signals — held in
   matching).
 - **Daily sessions by default** — resumes today's context automatically;
   `--session <name>` pins a longer-running named project.
-- **Persistent memory** (`memory.md`) loaded into every system prompt.
+- **Persistent memory** (`memory.md` by default, or a pluggable `MemoryStore`
+  for library use — per-user memory for multi-tenant apps).
+- **Embeddable as a library** — `run_agent(...)` accepts a per-call
+  `memory_store` and `on_iteration` callback for SSE/WebSocket streaming.
 - **Duplicate-call guard** — identical back-to-back tool calls are rejected
   with a synthetic error so ReAct loops can't spin forever.
 - **Read-only DB enforcement** at the PostgreSQL session level plus a
   write-keyword regex on `run_sql` — defense in depth.
-- **197 tests, 87% coverage**, ruff + mypy clean, CI on Python 3.10/3.11/3.12.
+- **209 tests, 83% coverage**, ruff + mypy clean, CI on Python 3.10/3.11/3.12.
 
 ## Architecture
 
@@ -232,8 +235,64 @@ See `evals/README.md` for case format and guidance.
   (`YYYY-MM-DD`). Ask a question, get an answer, follow up — same session.
   Midnight rolls over; yesterday's transcript stays on disk.
 - **Named sessions** (`--session aapl-research`) persist across days.
-- **`memory.md`** is global. Loaded into the system prompt every run. Appended
-  via the `remember` tool or edited by hand.
+- **`memory.md`** is global for the CLI. Loaded into the system prompt every
+  run; appended via the `remember` tool or edited by hand. Library consumers
+  can swap in their own `MemoryStore` for per-user memory — see
+  [Embedding Finn](#embedding-finn-in-another-python-app).
+
+## Embedding Finn in another Python app
+
+`run_agent` is importable, reentrant, and configurable per call — use it as a
+library inside another service (e.g. a FastAPI backend) without forking.
+
+```python
+from agent.loop import IterationEvent, run_agent
+from agent.memory import MemoryStore
+
+
+class DbMemoryStore:
+    """Two-method protocol: read() -> str, append(fact) -> None."""
+    def __init__(self, db, user_id: int):
+        self.db, self.user_id = db, user_id
+
+    def read(self) -> str:
+        row = self.db.query(UserMemory).filter_by(user_id=self.user_id).one_or_none()
+        return row.content if row else ""
+
+    def append(self, fact: str) -> None:
+        ...  # upsert into user_memory table
+
+
+def on_step(event: IterationEvent) -> None:
+    # Push per-iteration progress to the frontend via SSE/WebSocket.
+    for tc in event.tool_calls:
+        send_sse({"tool": tc.name, "args": tc.args, "summary": tc.result_summary})
+    if event.final_answer is not None:
+        send_sse({"answer": event.final_answer})
+
+
+answer, messages = run_agent(
+    question,
+    prior_messages=load_from_db(user_id, session_id),   # your DB, not agent.session
+    memory_store=DbMemoryStore(db, user_id),            # per-user isolation
+    on_iteration=on_step,                               # streaming progress
+    verbose=False,                                      # skip CLI prints
+)
+save_to_db(user_id, session_id, messages)
+```
+
+**Key points for multi-tenant servers:**
+
+- **Sessions** — `agent.session` is CLI-only; store `messages` wherever you
+  like, pass via `prior_messages`, persist the returned list.
+- **Memory** — implement the `MemoryStore` protocol and pass it per request.
+  Binding is via a `ContextVar`, so concurrent async tasks and threads each
+  see their own store without locks.
+- **Streaming** — `on_iteration` fires once per ReAct step. The terminal
+  iteration (no more tool calls) carries `final_answer`; earlier iterations
+  carry a list of `ToolCallRecord(name, args, blocked, result, result_summary)`.
+- **Defaults preserved** — omit `memory_store` and Finn falls back to
+  `FileMemoryStore(Settings.memory_path)` so the standalone CLI is unchanged.
 
 ## Known quirks (documented in the system prompt)
 
@@ -254,13 +313,14 @@ agent/
 │   ├── __main__.py         # python -m agent
 │   ├── cli.py              # stock-agent entry point
 │   ├── loop.py             # ReAct loop + streaming
-│   ├── compaction.py       # stage 1/2 compaction + ThinkFilter
+│   ├── compaction.py       # stage 1/2 compaction + <think> stripping
 │   ├── config.py           # Pydantic Settings
 │   ├── db.py               # read-only SQLAlchemy engine
 │   ├── llm.py              # OpenAI client + /v1/models probe
 │   ├── logging_setup.py
+│   ├── memory.py           # MemoryStore protocol + FileMemoryStore + contextvar
 │   ├── prompt.py           # system prompt builder
-│   ├── session.py          # daily/named session persistence
+│   ├── session.py          # daily/named session persistence (CLI-only)
 │   └── tools/              # @tool registry + Pydantic arg models
 │       ├── base.py
 │       ├── market.py

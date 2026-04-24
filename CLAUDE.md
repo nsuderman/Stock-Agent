@@ -47,14 +47,15 @@ agent/agent/              the installable package
 ├── __init__.py
 ├── __main__.py           python -m agent
 ├── cli.py                CLI entry
-├── loop.py               ReAct loop, streaming, dedup guard
-├── compaction.py         stage 1/2 compaction + ThinkFilter
+├── loop.py               ReAct loop, streaming, dedup guard, IterationEvent
+├── compaction.py         stage 1/2 compaction + <think> stripping
 ├── config.py             Pydantic Settings
 ├── db.py                 read-only PG engine
 ├── llm.py                OpenAI client + /v1/models probe
 ├── logging_setup.py
+├── memory.py             MemoryStore protocol + FileMemoryStore + contextvar
 ├── prompt.py
-├── session.py
+├── session.py            (CLI-only; library callers manage their own history)
 └── tools/
     ├── base.py           @tool decorator + ToolEntry + fetch helper
     ├── market.py         stock.analytics + symbols_info + regime + breakouts
@@ -63,12 +64,14 @@ agent/agent/              the installable package
     ├── memory.py         remember()
     ├── news.py           get_stock_news (Yahoo Finance via yfinance)
     ├── sec.py            get_recent_filings + get_insider_transactions (SEC EDGAR via edgartools)
+    ├── macro.py          get_fred_series + get_macro_snapshot (FRED via httpx)
+    ├── charts.py         plot_comparison (matplotlib PNG to charts/)
     └── sql.py            run_sql escape hatch
 tests/                    pytest unit tests
 evals/                    gold-set regression harness
 ```
 
-## Current tool count: 17
+## Current tool count: 23
 
 Registered in `agent.tools.TOOLS` at import time via the `@tool` decorator.
 Keep `test_tool_registry.py:test_all_expected_tools_registered` in sync when
@@ -82,7 +85,96 @@ adding or removing tools.
   handling supports both nested (`content{...}`) and legacy flat responses.
 - **SEC EDGAR** via `edgartools>=5.0` (see `tools/sec.py`). Compliance
   requires `SEC_USER_AGENT` in `.env` with real contact info; the tool
-  calls `set_identity()` lazily on first invocation.
+  calls `set_identity()` lazily on first invocation. 13F-HR support
+  (`get_13f_filings`, `get_13f_holdings`, `get_13f_changes`) covers one
+  manager at a time — cross-market aggregates (e.g. "which stocks did
+  institutions buy most last quarter?") require a batch pipeline, not a
+  single tool call.
+- **FRED** (St. Louis Fed macro data) via direct httpx (see `tools/macro.py`).
+  Requires `FRED_API_KEY` in `.env` (free). `get_macro_snapshot` bundles 10
+  curated series — 2Y/10Y/10Y-real yields, 2s10s, Fed funds, VIX, HY OAS,
+  trade-weighted USD, WTI oil, CPI — with latest value + 1w/1m deltas, so a
+  single call covers the regime backdrop. `get_fred_series` is the generic
+  escape hatch. Observations are cached per `(series_id, start, end, limit)`
+  for 4 hours (process-local) — matters for long-lived library callers, not
+  the short-lived CLI.
+
+## Chart rendering
+
+`plot_comparison` (in `tools/charts.py`) renders PNG charts via matplotlib's
+Agg backend (headless-safe). Output PNGs are written to `charts/` at repo
+root; the tool returns the absolute path so the agent can surface it in the
+final answer and the user can open or download it.
+
+**Data sources** (at least one non-empty):
+- `symbols` — tickers from `stock.analytics` (fetched as full OHLCV; candlestick
+  and ATR/volume indicators need it).
+- `fred_series` — FRED series IDs.
+- `backtest_ids` — `backtest_results.id` list; pulls `equity_curve` JSON
+  (shape `[{date, value}, ...]`) and overlays it.
+
+**Render modes (`mode`)**
+- `normalized` (default): rebase to 100 at start, one Y-axis. Any count, any scale.
+- `absolute`: raw values, one axis. Same-scale only.
+- `dual_axis`: two Y-axes, exactly 2 series.
+
+**Chart types (`chart_type`)**
+- `line` (default).
+- `candlestick`: exactly 1 symbol, 0 FRED series, 0 backtests; incompatible
+  with `normalized`.
+
+**Overlays (main pane)**
+- `moving_averages: list[int]` — SMA periods per symbol (dashed lines).
+- `ema_periods: list[int]` — EMA periods per symbol (dotted lines).
+- `bollinger: bool` — 20-period / 2σ Bollinger Bands on the FIRST symbol.
+- `horizontal_lines: list[float]` — constant Y levels.
+- `log_scale: bool` — log Y-axis (absolute mode only, positive values).
+
+**Events (date-anchored annotations on the main pane)**
+- `events: list[ChartEvent]` — each event is `{date, label?, style, symbol?, price?, color?}`.
+  - `style="line"` (default) — dashed vertical line spanning the main chart; optional
+    label rendered rotated at the top.
+  - `style="marker"` — filled dot on a symbol's price line. Anchor resolution:
+    `symbol` param if given, else the first symbol on the chart. Y-value is
+    `price` if given, else the anchor symbol's close on (or just before) the
+    event date via `bisect_right`. In `mode="normalized"`, the y value is
+    rebased using the anchor symbol's start-of-range close so markers land on
+    the 100-indexed axis. Events whose anchor symbol is missing or whose date
+    predates the symbol's history are silently skipped.
+- The `events_drawn` key in the return payload lists exactly what rendered.
+
+**Subplot indicators (stacked below main, computed on FIRST symbol only)**
+- `indicators: list[Literal["rsi", "macd", "volume", "atr"]]` — one pane per
+  entry in the order given. Layout via GridSpec, main/subplot height ratio 3:1.
+- RSI shows 30/70 reference lines, clamped 0–100. MACD shows line + signal +
+  color-coded histogram. Volume is color-coded up/down bars. ATR is a line.
+- Indicator math uses pandas rolling/ewm (clean, consistent) — we do NOT read
+  the analytics table's pre-computed indicators since period selection must
+  be arbitrary.
+
+**Layout**
+- Figsize `(11, 5.5 + 1.7 × indicator_count)`.
+- Watermark is fig-relative inset axes — fits any figsize.
+- `fig.subplots_adjust(bottom≥0.16)` reserves space so the watermark clears
+  rotated x-axis labels.
+
+**Auto-cleanup**
+PNGs in `charts/` older than `CHARTS_RETENTION_DAYS` (7 days) are deleted
+at the start of every call. Process-local, cron-free.
+
+**Branding**
+Quantara logo watermark (bottom-right, 55% alpha) + purple title/grid.
+Logo lives at `agent/assets/quantara_logo.png` (alpha-masked from Quantara's
+`email_sig.jpg`). Hatch bundles the PNG in the wheel automatically.
+
+**Constraints enforced in `plot_comparison`**
+- Indicators require at least one symbol.
+- `dual_axis` requires exactly 2 series across all sources.
+- `candlestick` requires exactly 1 symbol, 0 FRED, 0 backtests, and not
+  `mode="normalized"`.
+
+`charts/` is gitignored. In library mode, the host app should serve it
+via a static-file route so `relative_path` resolves to a URL.
 
 ## Conventions and non-obvious decisions
 
@@ -129,10 +221,11 @@ ANSI handling in `cli.py`:
 
 ## Streaming + the `<think>` tag problem
 
-qwen3.6-35b-a3b emits `<think>...</think>` blocks as part of its reasoning,
-often empty. `agent/compaction.py:ThinkFilter` is a chunk-stateful stripper
-that hides them during streaming AND the `THINK_RE` regex strips them from
-stored message content before appending to history.
+qwen3.6-35b-a3b (and other reasoning models) emit `<think>...</think>` blocks
+as part of their output. Streaming content is accumulated silently — the user
+only sees the `Spinner` until tools dispatch or the final answer is ready. The
+`THINK_RE` regex in `agent/compaction.py` strips the tags from stored message
+content before it's rendered to the user and appended to history.
 
 ## Compaction
 
@@ -169,6 +262,31 @@ Tunables:
 | `MAX_RESPONSE_TOKENS` | `4096` | Reserved for reply; subtracted from window. |
 | `LOCAL_CONTEXT_WINDOW` | `32768` | Fallback when probe fails (local). |
 | `REMOTE_CONTEXT_WINDOW` | `128000` | Fallback when probe fails (`--remote`). |
+
+## Library mode (embedding in another Python app)
+
+`run_agent` is importable and reentrant. The CLI is a thin wrapper around it.
+A host app (e.g. the Quantara-API FastAPI backend) should import `run_agent`
+and pass these per-call parameters instead of relying on the file-based CLI
+state:
+
+- `prior_messages: list[dict]` — conversation history. Load from your own
+  store (DB row per `user_id × session_id`), pass in, save the returned list.
+  `agent.session` is CLI-only; skip it.
+- `memory_store: MemoryStore` — per-user memory backing. Implement the
+  two-method protocol (`read() -> str`, `append(fact) -> None`) against your
+  DB. The agent binds it for the duration of the call via a `ContextVar`
+  (`agent/memory.py::use_memory_store`), so concurrent async tasks and
+  threads each see their own store with no locking.
+- `on_iteration: Callable[[IterationEvent], None]` — fires once per ReAct
+  step. `IterationEvent` has `iteration: int`, `tool_calls: list[ToolCallRecord]`
+  (each with `name`, `args`, `blocked`, `result`, `result_summary`), and
+  `final_answer: str | None` (populated only on the terminal iteration).
+  Use for SSE/WebSocket streaming to a frontend.
+
+No explicit `memory_store` → falls back to `FileMemoryStore(Settings.memory_path)`
+so the CLI's `memory.md` flow is unchanged. Consumer callbacks that raise are
+caught and logged; the loop continues.
 
 ## Duplicate-call guard
 

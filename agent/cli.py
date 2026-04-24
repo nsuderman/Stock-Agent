@@ -125,11 +125,20 @@ def _interactive(
         if prior:
             print(f"  {_D}[resumed {len(prior)} prior messages]{_RESET}\n")
 
+    def _persist_on_exit() -> None:
+        """Save whatever's accumulated if we're in a session."""
+        if session_name and prior:
+            try:
+                save_session(session_name, prior)
+            except OSError as e:
+                print(f"  {_D}[session save failed: {e}]{_RESET}")
+
     prompt = _readline_prompt(f"{_B}>{_RESET} ")
     while True:
         try:
             raw = input(prompt)
         except (EOFError, KeyboardInterrupt):
+            _persist_on_exit()
             print(f"\n{_D}bye.{_RESET}")
             return 0
 
@@ -143,6 +152,7 @@ def _interactive(
             cmd = cmd.lower()
             arg = rest[0].strip() if rest else ""
             if cmd in ("/exit", "/quit"):
+                _persist_on_exit()
                 print(f"{_D}bye.{_RESET}")
                 return 0
             if cmd == "/help":

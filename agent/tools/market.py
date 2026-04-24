@@ -67,7 +67,7 @@ _DEFAULT_PRICE_COLS = [
 
 
 @tool(
-    description="Fetch OHLCV + indicator columns for one symbol over a date range from stock.analytics."
+    description="Fetch OHLCV + indicator columns for one symbol over a date range from {db_schema}.analytics."
 )
 def get_price_history(args: PriceHistoryArgs) -> dict[str, Any]:
     schema = get_settings().db_schema
@@ -125,7 +125,7 @@ def get_market_regime(args: MarketRegimeArgs) -> dict[str, Any]:
 
 
 @tool(
-    description="Get DTW pattern breakout signals as of a target date via stock.get_live_breakouts()."
+    description="Get DTW pattern breakout signals as of a target date via {db_schema}.get_live_breakouts()."
 )
 def get_breakouts(args: BreakoutsArgs) -> dict[str, Any]:
     schema = get_settings().db_schema

@@ -77,3 +77,59 @@ def test_save_handles_unicode(tmp_memory: Path):
     save_session("unicode", messages)
     loaded = load_session("unicode")
     assert loaded == messages
+
+
+def test_load_ignores_corrupt_json(tmp_memory: Path):
+    """A truncated/corrupt file should return []; the caller shouldn't see a crash."""
+    path = session_path("corrupt")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[{"role": "user", "content": "hi"', encoding="utf-8")
+    assert load_session("corrupt") == []
+
+
+def test_load_drops_malformed_messages(tmp_memory: Path):
+    """Non-dict entries and dicts missing a role are filtered out, not crashy."""
+    path = session_path("mixed")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            [
+                None,
+                {"role": "user", "content": "ok"},
+                {"content": "no role"},
+                {"role": "", "content": "empty role"},
+                "string entry",
+                {"role": "assistant", "content": "also ok"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_session("mixed")
+    assert loaded == [
+        {"role": "user", "content": "ok"},
+        {"role": "assistant", "content": "also ok"},
+    ]
+
+
+def test_save_is_atomic(tmp_memory: Path, monkeypatch):
+    """If the write fails mid-way, the original file must remain intact."""
+    save_session("atomic", [{"role": "user", "content": "original"}])
+    original = load_session("atomic")
+
+    # Force os.replace to fail, simulating a crash between tmp write and rename.
+    import agent.session as sess
+
+    def _boom(*args, **kwargs):
+        raise OSError("simulated crash")
+
+    import contextlib
+
+    monkeypatch.setattr(sess.os, "replace", _boom)
+    with contextlib.suppress(OSError):
+        save_session("atomic", [{"role": "user", "content": "new"}])
+
+    # Original file is untouched.
+    assert load_session("atomic") == original
+    # No stray .tmp left for the caller? (It's acceptable to leave one since a
+    # future successful write will overwrite it; assert the main path is intact.)
+    assert session_path("atomic").exists()

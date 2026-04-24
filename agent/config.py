@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,11 +52,27 @@ class Settings(BaseSettings):
         description="Cap on ReAct loop iterations per agent invocation.",
     )
 
+    max_tool_concurrency: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description=(
+            "Max number of tool calls to dispatch in parallel per ReAct iteration. "
+            "Tools are I/O-bound (PG, yfinance, SEC EDGAR), so a thread pool wins. "
+            "Set to 1 to force sequential dispatch."
+        ),
+    )
+
     log_level: str = Field(default="INFO")
 
     sec_user_agent: str = Field(
         default="Stock Agent (example@example.com)",
         description="User-Agent header sent to SEC EDGAR. Their fair-use policy requires this.",
+    )
+
+    fred_api_key: str | None = Field(
+        default=None,
+        description="FRED API key from fredaccount.stlouisfed.org. Required for macro tools.",
     )
 
     @property
@@ -86,3 +103,19 @@ def reset_settings_cache() -> None:
     """Testing hook — clear the cached Settings."""
     global _settings
     _settings = None
+
+
+def configure(**overrides: Any) -> Settings:
+    """Library-mode initialization: build a Settings with explicit overrides.
+
+    Call this from a host application (e.g. FastAPI startup) BEFORE the first
+    `run_agent` invocation. Explicit kwargs take precedence over environment
+    variables and the agent's own `.env` file — so you can, for example, pin
+    `db_schema="stock"` and `backtest_schema="dev"` even when the host's env
+    has a conflicting `DB_SCHEMA` that would otherwise cascade in.
+
+    Fields you don't override still fall through to env → .env → defaults.
+    """
+    global _settings
+    _settings = Settings(**overrides)
+    return _settings

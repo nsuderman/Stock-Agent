@@ -29,6 +29,12 @@ class TestRegistry:
             "get_stock_news",
             "get_recent_filings",
             "get_insider_transactions",
+            "get_13f_filings",
+            "get_13f_holdings",
+            "get_13f_changes",
+            "get_fred_series",
+            "get_macro_snapshot",
+            "plot_comparison",
         }
         assert set(TOOLS.keys()) >= expected
 
@@ -101,6 +107,48 @@ class _CustomArgs(BaseModel):
     """Module-level so typing.get_type_hints can resolve the forward reference."""
 
     x: int = Field(..., ge=0)
+
+
+class TestToolSchemaTemplating:
+    """`openai_tool_schemas()` must render {db_schema}/{backtest_schema} placeholders
+    from the active Settings at call time."""
+
+    def test_default_schemas_keep_stock_references(self):
+        schemas = openai_tool_schemas()
+        by_name = {s["function"]["name"]: s for s in schemas}
+        # Default Settings has db_schema=stock, backtest_schema=stock → rendered
+        # descriptions look unchanged from the legacy text.
+        desc_sql = by_name["run_sql"]["function"]["description"]
+        assert "stock.analytics" in desc_sql
+        assert "stock.backtest_results" in desc_sql
+        assert "{db_schema}" not in desc_sql
+
+    def test_configure_flows_through_to_tool_descriptions(self):
+        """The split-schema case (Quantara): stock for market, dev for backtest."""
+        from agent.config import configure, reset_settings_cache
+
+        configure(db_schema="stock", backtest_schema="dev")
+        try:
+            schemas = openai_tool_schemas()
+            by_name = {s["function"]["name"]: s for s in schemas}
+            desc_sql = by_name["run_sql"]["function"]["description"]
+            assert "stock.analytics" in desc_sql
+            assert "dev.backtest_results" in desc_sql
+            # No leftover placeholders in any description.
+            for s in schemas:
+                d = s["function"]["description"]
+                assert "{db_schema}" not in d
+                assert "{backtest_schema}" not in d
+        finally:
+            reset_settings_cache()
+
+    def test_tools_without_placeholders_passthrough_unchanged(self):
+        """Descriptions without placeholders should be returned verbatim (no unneeded copy)."""
+        schemas = openai_tool_schemas()
+        by_name = {s["function"]["name"]: s for s in schemas}
+        # `remember` description has no schema references.
+        desc = by_name["remember"]["function"]["description"]
+        assert "{" not in desc
 
 
 class TestCustomTool:

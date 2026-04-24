@@ -34,8 +34,8 @@ class SampleRowsArgs(BaseModel):
 
 @tool(
     description=(
-        "List every column name + type in stock.analytics. Call this FIRST whenever the "
-        "user asks about indicators or you're unsure which columns exist."
+        "List every column name + type in {db_schema}.analytics. Call this FIRST whenever "
+        "the user asks about indicators or you're unsure which columns exist."
     )
 )
 def list_analytics_columns(args: _NoArgs) -> dict[str, Any]:
@@ -51,7 +51,8 @@ def list_analytics_columns(args: _NoArgs) -> dict[str, Any]:
 @tool(
     description=(
         "Return column names + types for ANY schema.table. Use before writing run_sql "
-        "against an unfamiliar table (e.g. stock.backtest_results, stock.strategies)."
+        "against an unfamiliar table (e.g. {backtest_schema}.backtest_results, "
+        "{backtest_schema}.strategies)."
     )
 )
 def describe_table(args: DescribeTableArgs) -> dict[str, Any]:

@@ -161,8 +161,26 @@ def tool(
 
 
 def openai_tool_schemas() -> list[dict[str, Any]]:
-    """All registered tools in OpenAI `tools=[...]` format."""
-    return [entry.schema for entry in TOOLS.values()]
+    """All registered tools in OpenAI `tools=[...]` format.
+
+    Tool descriptions may contain `{db_schema}` / `{backtest_schema}` placeholders.
+    Those are rendered from the active Settings on every call, so tool schemas
+    reflect whatever schemas the host app has configured (via
+    `agent.config.configure(...)` or env).
+    """
+    from agent.prompt import render_schemas
+
+    schemas: list[dict[str, Any]] = []
+    for entry in TOOLS.values():
+        raw = entry.schema
+        fn = raw.get("function", {})
+        description = fn.get("description", "")
+        if "{db_schema}" in description or "{backtest_schema}" in description:
+            rendered = {**raw, "function": {**fn, "description": render_schemas(description)}}
+            schemas.append(rendered)
+        else:
+            schemas.append(raw)
+    return schemas
 
 
 def invoke_tool(name: str, args: dict[str, Any]) -> Any:

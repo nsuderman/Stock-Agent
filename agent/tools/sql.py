@@ -18,7 +18,7 @@ class RunSqlArgs(BaseModel):
     description=(
         "Read-only SQL escape hatch. Use ONLY when no narrower tool fits (cross-table "
         "joins, custom aggregations). Rejects non-SELECT keywords. Fully qualify tables "
-        "(stock.analytics, stock.backtest_results)."
+        "({db_schema}.analytics, {backtest_schema}.backtest_results)."
     )
 )
 def run_sql(args: RunSqlArgs) -> dict[str, Any]:
